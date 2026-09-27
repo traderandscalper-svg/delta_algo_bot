@@ -72,6 +72,11 @@ class Settings(BaseSettings):
         ge=1,
     )
 
+    paper_starting_equity: float = Field(
+        default=10_000.0,
+        gt=0,
+    )
+
     # --------------------------------------------------------
     # Safety
     # --------------------------------------------------------
@@ -106,25 +111,24 @@ class Settings(BaseSettings):
         Validate settings before the engine is allowed to start.
         """
 
-        if self.trading_mode == TradingMode.DEMO:
+        if self.trading_mode in {TradingMode.DEMO, TradingMode.PAPER}:
             if not self.delta_rest_url:
-                raise ValueError("DELTA_REST_URL is required in DEMO mode.")
+                raise ValueError("DELTA_REST_URL is required in DEMO/PAPER mode.")
 
             if not self.delta_public_ws_url:
                 raise ValueError(
-                    "DELTA_PUBLIC_WS_URL is required in DEMO mode."
+                    "DELTA_PUBLIC_WS_URL is required in DEMO/PAPER mode."
                 )
 
+        if self.trading_mode == TradingMode.DEMO:
             if not self.delta_private_ws_url:
                 raise ValueError(
                     "DELTA_PRIVATE_WS_URL is required in DEMO mode."
                 )
-
             if not self.delta_api_key:
                 raise ValueError(
                     "DELTA_API_KEY is required in DEMO mode."
                 )
-
             if not self.delta_api_secret:
                 raise ValueError(
                     "DELTA_API_SECRET is required in DEMO mode."
