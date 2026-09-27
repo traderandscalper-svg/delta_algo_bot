@@ -4764,7 +4764,7 @@ class TradingEngine:
         )
 
         self.signal_performance_tracker = SignalPerformanceTracker()
-        self.persistence = EnginePersistence()
+        self.persistence = EnginePersistence(str(Path(self.settings.data_directory) / "state" / "engine_state.json"))
         self.recovery_state = self.persistence.load()
 
         self.learning_engine = (
