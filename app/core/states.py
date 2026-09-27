@@ -1,0 +1,15 @@
+from enum import Enum
+
+
+class EngineState(str, Enum):
+    STARTING = "STARTING"
+    INITIALIZING = "INITIALIZING"
+    CONNECTING = "CONNECTING"
+    SYNCING = "SYNCING"
+    READY = "READY"
+    TRADING = "TRADING"
+
+    SAFE_MODE = "SAFE_MODE"
+    ERROR = "ERROR"
+    EMERGENCY_STOP = "EMERGENCY_STOP"
+    SHUTDOWN = "SHUTDOWN"

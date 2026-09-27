@@ -1,0 +1,1563 @@
+from __future__ import annotations
+
+import csv
+import logging
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+DATASET_FILE = Path(
+    "data/ml/final_training_dataset.csv"
+)
+
+RESULT_FILE = Path(
+    "data/ml/backtest_engine_test.csv"
+)
+
+SYMBOL = "BTCUSD"
+
+
+# ------------------------------------------------------------
+# Execution assumptions
+# ------------------------------------------------------------
+
+# These are configurable simulation assumptions.
+# They are NOT claims about Delta's current live fees.
+
+DEFAULT_INITIAL_CAPITAL = 10_000.0
+
+DEFAULT_FEE_RATE = 0.0005
+
+DEFAULT_SLIPPAGE_BPS = 1.0
+
+DEFAULT_STOP_LOSS_PCT = 0.0025
+
+DEFAULT_TAKE_PROFIT_PCT = 0.0025
+
+DEFAULT_MAX_HOLD_SECONDS = 60
+
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=(
+        "%(asctime)s | %(levelname)-8s | "
+        "%(name)s | %(message)s"
+    ),
+)
+
+logger = logging.getLogger(
+    "BacktestEngine"
+)
+
+
+# ============================================================
+# DATA STRUCTURES
+# ============================================================
+
+@dataclass
+class MarketBar:
+    """
+    One chronological market observation.
+    """
+
+    timestamp: float
+
+    symbol: str
+
+    bid: float
+
+    ask: float
+
+    mid: float
+
+    spread: float
+
+    trade_price: Optional[float]
+
+    trade_volume: float
+
+    imbalance: float
+
+    volatility: float
+
+
+@dataclass
+class Position:
+    """
+    Simulated open position.
+    """
+
+    side: str
+
+    entry_time: float
+
+    entry_price: float
+
+    quantity: float
+
+    stop_loss: Optional[float]
+
+    take_profit: Optional[float]
+
+    max_exit_time: float
+
+
+@dataclass
+class Trade:
+    """
+    Completed simulated trade.
+    """
+
+    entry_time: float
+
+    exit_time: float
+
+    side: str
+
+    entry_price: float
+
+    exit_price: float
+
+    quantity: float
+
+    gross_pnl: float
+
+    fees: float
+
+    slippage_cost: float
+
+    net_pnl: float
+
+    exit_reason: str
+    holding_seconds: float
+
+
+@dataclass
+class BacktestConfig:
+    """
+    Backtesting configuration.
+    """
+
+    initial_capital: float = (
+        DEFAULT_INITIAL_CAPITAL
+    )
+
+    fee_rate: float = (
+        DEFAULT_FEE_RATE
+    )
+
+    slippage_bps: float = (
+        DEFAULT_SLIPPAGE_BPS
+    )
+
+    stop_loss_pct: float = (
+        DEFAULT_STOP_LOSS_PCT
+    )
+
+    take_profit_pct: float = (
+        DEFAULT_TAKE_PROFIT_PCT
+    )
+
+    max_hold_seconds: int = (
+        DEFAULT_MAX_HOLD_SECONDS
+    )
+
+    allow_long: bool = True
+
+    allow_short: bool = True
+
+
+# ============================================================
+# NUMERIC HELPERS
+# ============================================================
+
+def safe_float(
+    value,
+) -> Optional[float]:
+
+    if value is None:
+        return None
+
+    if value == "":
+        return None
+
+    try:
+
+        result = float(value)
+
+        if not math.isfinite(result):
+
+            return None
+
+        return result
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+
+        return None
+
+
+# ============================================================
+# DATASET LOADING
+# ============================================================
+
+def load_market_data(
+    path: Path = DATASET_FILE,
+) -> List[MarketBar]:
+
+    if not path.exists():
+
+        raise FileNotFoundError(
+            f"Dataset not found: {path}"
+        )
+
+    with path.open(
+        "r",
+        newline="",
+        encoding="utf-8",
+    ) as handle:
+
+        reader = csv.DictReader(handle)
+
+        rows = list(reader)
+
+    bars: List[MarketBar] = []
+
+    for row in rows:
+
+        symbol = (
+            row.get("symbol")
+            or SYMBOL
+        )
+
+        if symbol != SYMBOL:
+            continue
+
+        timestamp = safe_float(
+            row.get(
+                "feature_timestamp_seconds"
+            )
+        )
+
+        bid = safe_float(
+            row.get("bid_close")
+        )
+
+        ask = safe_float(
+            row.get("ask_close")
+        )
+
+        mid = safe_float(
+            row.get("mid_close")
+        )
+
+        spread = safe_float(
+            row.get("spread_close")
+        )
+
+        if (
+            timestamp is None
+            or bid is None
+            or ask is None
+            or mid is None
+            or spread is None
+        ):
+
+            continue
+
+        trade_price = safe_float(
+            row.get(
+                "trade_price_close"
+            )
+        )
+
+        trade_volume = safe_float(
+            row.get(
+                "trade_volume"
+            )
+        )
+
+        imbalance = safe_float(
+            row.get(
+                "imbalance_mean"
+            )
+        )
+
+        volatility = safe_float(
+            row.get(
+                "intrasecond_volatility"
+            )
+        )
+
+        bars.append(
+            MarketBar(
+                timestamp=timestamp,
+                symbol=symbol,
+                bid=bid,
+                ask=ask,
+                mid=mid,
+                spread=spread,
+                trade_price=trade_price,
+                trade_volume=(
+                    trade_volume
+                    if trade_volume is not None
+                    else 0.0
+                ),
+                imbalance=(
+                    imbalance
+                    if imbalance is not None
+                    else 0.0
+                ),
+                volatility=(
+                    volatility
+                    if volatility is not None
+                    else 0.0
+                ),
+            )
+        )
+
+    bars.sort(
+        key=lambda bar:
+        bar.timestamp
+    )
+
+    logger.info(
+        "Market bars loaded | %d",
+        len(bars),
+    )
+
+    return bars
+
+
+# ============================================================
+# EXECUTION PRICE MODEL
+# ============================================================
+
+def apply_slippage(
+    price: float,
+    side: str,
+    slippage_bps: float,
+) -> float:
+
+    adjustment = (
+        slippage_bps / 10_000.0
+    )
+
+    if side == "BUY":
+
+        return price * (
+            1.0 + adjustment
+        )
+
+    return price * (
+        1.0 - adjustment
+    )
+
+
+# ============================================================
+# ENTRY EXECUTION
+# ============================================================
+
+def execute_entry(
+    bar: MarketBar,
+    side: str,
+    config: BacktestConfig,
+) -> float:
+
+    if side == "LONG":
+
+        # A long market entry consumes the ask.
+        raw_price = bar.ask
+
+        execution_side = "BUY"
+
+    elif side == "SHORT":
+
+        # A short market entry consumes the bid.
+        raw_price = bar.bid
+
+        execution_side = "SELL"
+
+    else:
+
+        raise ValueError(
+            f"Invalid position side: {side}"
+        )
+
+    return apply_slippage(
+        raw_price,
+        execution_side,
+        config.slippage_bps,
+    )
+
+
+# ============================================================
+# EXIT EXECUTION
+# ============================================================
+
+def execute_exit(
+    bar: MarketBar,
+    side: str,
+    config: BacktestConfig,
+) -> float:
+
+    if side == "LONG":
+
+        # Closing a long sells into the bid.
+        raw_price = bar.bid
+
+        execution_side = "SELL"
+
+    elif side == "SHORT":
+
+        # Closing a short buys from the ask.
+        raw_price = bar.ask
+
+        execution_side = "BUY"
+
+    else:
+
+        raise ValueError(
+            f"Invalid position side: {side}"
+        )
+
+    return apply_slippage(
+        raw_price,
+        execution_side,
+        config.slippage_bps,
+    )
+
+
+# ============================================================
+# POSITION SIZE
+# ============================================================
+
+def calculate_quantity(
+    capital: float,
+    price: float,
+    capital_fraction: float = 1.0,
+) -> float:
+
+    if capital <= 0:
+        return 0.0
+
+    if price <= 0:
+        return 0.0
+
+    notional = (
+        capital
+        * capital_fraction
+    )
+
+    return (
+        notional / price
+    )
+
+
+# ============================================================
+# PNL
+# ============================================================
+
+def calculate_gross_pnl(
+    position: Position,
+    exit_price: float,
+) -> float:
+
+    if position.side == "LONG":
+
+        return (
+            exit_price
+            - position.entry_price
+        ) * position.quantity
+
+    if position.side == "SHORT":
+
+        return (
+            position.entry_price
+            - exit_price
+        ) * position.quantity
+
+    raise ValueError(
+        f"Invalid position side: "
+        f"{position.side}"
+    )
+
+
+def calculate_fees(
+    entry_price: float,
+    exit_price: float,
+    quantity: float,
+    fee_rate: float,
+) -> float:
+
+    entry_notional = (
+        abs(entry_price)
+        * quantity
+    )
+
+    exit_notional = (
+        abs(exit_price)
+        * quantity
+    )
+
+    return (
+        entry_notional
+        + exit_notional
+    ) * fee_rate
+
+
+def calculate_slippage_cost(
+    position: Position,
+    exit_price: float,
+    bar: MarketBar,
+) -> float:
+
+    # The actual execution prices already include
+    # slippage. This method estimates the explicit
+    # difference between theoretical bid/ask execution
+    # and the simulated execution price.
+
+    if position.side == "LONG":
+
+        theoretical_exit = bar.bid
+
+        theoretical_entry = bar.ask
+
+    else:
+
+        theoretical_exit = bar.ask
+
+        theoretical_entry = bar.bid
+
+    entry_cost = abs(
+        position.entry_price
+        - theoretical_entry
+    ) * position.quantity
+
+    exit_cost = abs(
+        exit_price
+        - theoretical_exit
+    ) * position.quantity
+
+    return (
+        entry_cost
+        + exit_cost
+    )
+
+
+# ============================================================
+# STOP / TARGET CALCULATION
+# ============================================================
+
+def calculate_stop_loss(
+    side: str,
+    entry_price: float,
+    percentage: float,
+) -> float:
+
+    if side == "LONG":
+
+        return entry_price * (
+            1.0 - percentage
+        )
+
+    return entry_price * (
+        1.0 + percentage
+    )
+
+
+def calculate_take_profit(
+    side: str,
+    entry_price: float,
+    percentage: float,
+) -> float:
+
+    if side == "LONG":
+
+        return entry_price * (
+            1.0 + percentage
+        )
+
+    return entry_price * (
+        1.0 - percentage
+    )
+
+
+# ============================================================
+# EXIT REASON
+# ============================================================
+
+def determine_exit_reason(
+    position: Position,
+    bar: MarketBar,
+) -> Optional[str]:
+
+    if position.side == "LONG":
+
+        # Conservative rule:
+        # if both levels could be touched inside the
+        # same observation, stop loss is processed first.
+
+        if (
+            position.stop_loss is not None
+            and bar.low if False else False
+        ):
+            pass
+
+        if (
+            position.stop_loss is not None
+            and bar.bid
+            <= position.stop_loss
+        ):
+
+            return "STOP_LOSS"
+
+        if (
+            position.take_profit is not None
+            and bar.bid
+            >= position.take_profit
+        ):
+
+            return "TAKE_PROFIT"
+
+    elif position.side == "SHORT":
+
+        if (
+            position.stop_loss is not None
+            and bar.ask
+            >= position.stop_loss
+        ):
+
+            return "STOP_LOSS"
+
+        if (
+            position.take_profit is not None
+            and bar.ask
+            <= position.take_profit
+        ):
+
+            return "TAKE_PROFIT"
+
+    if (
+        bar.timestamp
+        >= position.max_exit_time
+    ):
+
+        return "MAX_HOLD"
+
+    return None
+
+
+# ============================================================
+# BACKTEST ENGINE
+# ============================================================
+
+class BacktestEngine:
+
+    def __init__(
+        self,
+        config: Optional[
+            BacktestConfig
+        ] = None,
+    ):
+
+        self.config = (
+            config
+            or BacktestConfig()
+        )
+
+        self.capital = (
+            self.config.initial_capital
+        )
+
+        self.starting_capital = (
+            self.config.initial_capital
+        )
+
+        self.position: Optional[
+            Position
+        ] = None
+
+        self.trades: List[
+            Trade
+        ] = []
+
+        self.equity_curve: List[
+            Dict[str, float]
+        ] = []
+
+    # --------------------------------------------------------
+    # OPEN
+    # --------------------------------------------------------
+
+    def open_position(
+        self,
+        bar: MarketBar,
+        side: str,
+    ) -> bool:
+
+        if self.position is not None:
+
+            return False
+
+        if side == "LONG":
+
+            if not self.config.allow_long:
+                return False
+
+        elif side == "SHORT":
+
+            if not self.config.allow_short:
+                return False
+
+        else:
+
+            return False
+
+        entry_price = execute_entry(
+            bar,
+            side,
+            self.config,
+        )
+
+        quantity = calculate_quantity(
+            self.capital,
+            entry_price,
+        )
+
+        if quantity <= 0:
+
+            return False
+
+        stop_loss = calculate_stop_loss(
+            side,
+            entry_price,
+            self.config.stop_loss_pct,
+        )
+
+        take_profit = (
+            calculate_take_profit(
+                side,
+                entry_price,
+                self.config.take_profit_pct,
+            )
+        )
+
+        self.position = Position(
+            side=side,
+            entry_time=bar.timestamp,
+            entry_price=entry_price,
+            quantity=quantity,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            max_exit_time=(
+                bar.timestamp
+                + self.config.max_hold_seconds
+            ),
+        )
+
+        return True
+
+    # --------------------------------------------------------
+    # CLOSE
+    # --------------------------------------------------------
+
+    def close_position(
+        self,
+        bar: MarketBar,
+        reason: str,
+    ) -> Optional[Trade]:
+
+        if self.position is None:
+
+            return None
+
+        position = self.position
+
+        exit_price = execute_exit(
+            bar,
+            position.side,
+            self.config,
+        )
+
+        gross_pnl = calculate_gross_pnl(
+            position,
+            exit_price,
+        )
+
+        fees = calculate_fees(
+            position.entry_price,
+            exit_price,
+            position.quantity,
+            self.config.fee_rate,
+        )
+
+        slippage_cost = (
+            calculate_slippage_cost(
+                position,
+                exit_price,
+                bar,
+            )
+        )
+
+        net_pnl = (
+            gross_pnl
+            - fees
+        )
+
+        self.capital += net_pnl
+
+        holding_seconds = (
+            bar.timestamp
+            - position.entry_time
+        )
+
+        trade = Trade(
+            entry_time=position.entry_time,
+            exit_time=bar.timestamp,
+            side=position.side,
+            entry_price=position.entry_price,
+            exit_price=exit_price,
+            quantity=position.quantity,
+            gross_pnl=gross_pnl,
+            fees=fees,
+            slippage_cost=slippage_cost,
+            net_pnl=net_pnl,
+            exit_reason=reason,
+            holding_seconds=holding_seconds,
+        )
+
+        self.trades.append(
+            trade
+        )
+
+        self.position = None
+
+        return trade
+
+    # --------------------------------------------------------
+    # EQUITY
+    # --------------------------------------------------------
+
+    def calculate_equity(
+        self,
+        bar: MarketBar,
+    ) -> float:
+
+        if self.position is None:
+
+            return self.capital
+
+        position = self.position
+
+        if position.side == "LONG":
+
+            unrealized = (
+                bar.bid
+                - position.entry_price
+            ) * position.quantity
+
+        else:
+
+            unrealized = (
+                position.entry_price
+                - bar.ask
+            ) * position.quantity
+
+        return (
+            self.capital
+            + unrealized
+        )
+
+    # --------------------------------------------------------
+    # PROCESS BAR
+    # --------------------------------------------------------
+
+    def process_bar(
+        self,
+        bar: MarketBar,
+        signal: Optional[str],
+    ) -> None:
+
+        # ----------------------------------------------------
+        # Existing position
+        # ----------------------------------------------------
+
+        if self.position is not None:
+
+            exit_reason = (
+                determine_exit_reason(
+                    self.position,
+                    bar,
+                )
+            )
+
+            if exit_reason is not None:
+
+                self.close_position(
+                    bar,
+                    exit_reason,
+                )
+
+            else:
+
+                # Optional reversal.
+                if (
+                    signal == "LONG"
+                    and self.position.side
+                    == "SHORT"
+                ):
+
+                    self.close_position(
+                        bar,
+                        "SIGNAL_REVERSAL",
+                    )
+
+                    self.open_position(
+                        bar,
+                        "LONG",
+                    )
+
+                elif (
+                    signal == "SHORT"
+                    and self.position.side
+                    == "LONG"
+                ):
+
+                    self.close_position(
+                        bar,
+                        "SIGNAL_REVERSAL",
+                    )
+
+                    self.open_position(
+                        bar,
+                        "SHORT",
+                    )
+
+        # ----------------------------------------------------
+        # New position
+        # ----------------------------------------------------
+
+        if self.position is None:
+
+            if signal == "LONG":
+
+                self.open_position(
+                    bar,
+                    "LONG",
+                )
+
+            elif signal == "SHORT":
+
+                self.open_position(
+                    bar,
+                    "SHORT",
+                )
+
+        # ----------------------------------------------------
+        # Equity
+        # ----------------------------------------------------
+
+        equity = self.calculate_equity(
+            bar
+        )
+
+        self.equity_curve.append(
+            {
+                "timestamp": bar.timestamp,
+                "equity": equity,
+            }
+        )
+
+    # --------------------------------------------------------
+    # RUN
+    # --------------------------------------------------------
+
+    def run(
+        self,
+        bars: List[MarketBar],
+        signals: List[Optional[str]],
+    ) -> None:
+
+        if len(bars) != len(signals):
+
+            raise ValueError(
+                "bars and signals must have "
+                "the same length."
+            )
+
+        previous_timestamp = None
+
+        for bar, signal in zip(
+            bars,
+            signals,
+        ):
+
+            # Never process time backwards.
+            if (
+                previous_timestamp is not None
+                and bar.timestamp
+                < previous_timestamp
+            ):
+
+                raise ValueError(
+                    "Market data is not chronological."
+                )
+
+            previous_timestamp = (
+                bar.timestamp
+            )
+
+            self.process_bar(
+                bar,
+                signal,
+            )
+
+        # Force-close any remaining position
+        # at the final available market observation.
+        if (
+            self.position is not None
+            and bars
+        ):
+
+            self.close_position(
+                bars[-1],
+                "END_OF_DATA",
+            )
+
+    # --------------------------------------------------------
+    # METRICS
+    # --------------------------------------------------------
+
+    def metrics(self) -> Dict[str, float]:
+
+        total_trades = len(
+            self.trades
+        )
+
+        winning_trades = sum(
+            1
+            for trade in self.trades
+            if trade.net_pnl > 0
+        )
+
+        losing_trades = sum(
+            1
+            for trade in self.trades
+            if trade.net_pnl < 0
+        )
+
+        breakeven_trades = (
+            total_trades
+            - winning_trades
+            - losing_trades
+        )
+
+        gross_profit = sum(
+            trade.net_pnl
+            for trade in self.trades
+            if trade.net_pnl > 0
+        )
+
+        gross_loss = sum(
+            trade.net_pnl
+            for trade in self.trades
+            if trade.net_pnl < 0
+        )
+
+        total_fees = sum(
+            trade.fees
+            for trade in self.trades
+        )
+
+        total_slippage = sum(
+            trade.slippage_cost
+            for trade in self.trades
+        )
+
+        net_pnl = (
+            self.capital
+            - self.starting_capital
+        )
+
+        win_rate = (
+            winning_trades
+            / total_trades
+            if total_trades > 0
+            else 0.0
+        )
+
+        profit_factor = (
+            gross_profit
+            / abs(gross_loss)
+            if gross_loss < 0
+            else (
+                math.inf
+                if gross_profit > 0
+                else 0.0
+            )
+        )
+
+        # ----------------------------------------------------
+        # Drawdown
+        # ----------------------------------------------------
+
+        peak = (
+            self.starting_capital
+        )
+
+        max_drawdown = 0.0
+
+        for point in (
+            self.equity_curve
+        ):
+
+            equity = point[
+                "equity"
+            ]
+
+            if equity > peak:
+
+                peak = equity
+
+            drawdown = (
+                peak - equity
+            )
+
+            if drawdown > max_drawdown:
+
+                max_drawdown = drawdown
+
+        max_drawdown_pct = (
+            max_drawdown
+            / peak
+            if peak > 0
+            else 0.0
+        )
+
+        average_trade = (
+            net_pnl / total_trades
+            if total_trades > 0
+            else 0.0
+        )
+
+        return {
+            "starting_capital":
+                self.starting_capital,
+
+            "ending_capital":
+                self.capital,
+
+            "net_pnl":
+                net_pnl,
+
+            "return_pct":
+                (
+                    net_pnl
+                    / self.starting_capital
+                    * 100.0
+                    if self.starting_capital > 0
+                    else 0.0
+                ),
+
+            "total_trades":
+                total_trades,
+
+            "winning_trades":
+                winning_trades,
+
+            "losing_trades":
+                losing_trades,
+
+            "breakeven_trades":
+                breakeven_trades,
+
+            "win_rate":
+                win_rate,
+
+            "profit_factor":
+                profit_factor,
+
+            "gross_profit":
+                gross_profit,
+
+            "gross_loss":
+                gross_loss,
+
+            "total_fees":
+                total_fees,
+
+            "total_slippage":
+                total_slippage,
+
+            "max_drawdown":
+                max_drawdown,
+
+            "max_drawdown_pct":
+                max_drawdown_pct * 100.0,
+
+            "average_trade":
+                average_trade,
+        }
+
+
+# ============================================================
+# TEST SIGNAL GENERATOR
+# ============================================================
+
+def generate_test_signals(
+    bars: List[MarketBar],
+) -> List[Optional[str]]:
+
+    """
+    Temporary smoke-test strategy.
+
+    This is NOT a trading strategy recommendation.
+
+    It only verifies that the backtesting engine can
+    process LONG / SHORT / FLAT signals.
+
+    The real strategy modules will be created separately
+    in Phase 7.2+.
+    """
+
+    signals: List[
+        Optional[str]
+    ] = []
+
+    previous_mid = None
+
+    for bar in bars:
+
+        if previous_mid is None:
+
+            signals.append(None)
+
+            previous_mid = bar.mid
+
+            continue
+
+        change = (
+            bar.mid
+            - previous_mid
+        )
+
+        # Extremely small test threshold.
+        # This is deliberately only a technical smoke test.
+        threshold = (
+            max(
+                bar.spread * 0.25,
+                0.01,
+            )
+        )
+
+        if change > threshold:
+
+            signals.append("LONG")
+
+        elif change < -threshold:
+
+            signals.append("SHORT")
+
+        else:
+
+            signals.append(None)
+
+        previous_mid = bar.mid
+
+    return signals
+
+
+# ============================================================
+# SAVE TRADES
+# ============================================================
+
+def save_trades(
+    trades: List[Trade],
+    path: Path = RESULT_FILE,
+) -> None:
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    fieldnames = [
+        "entry_time",
+        "exit_time",
+        "side",
+        "entry_price",
+        "exit_price",
+        "quantity",
+        "gross_pnl",
+        "fees",
+        "slippage_cost",
+        "net_pnl",
+        "exit_reason",
+        "holding_seconds",
+    ]
+
+    with path.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as handle:
+
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=fieldnames,
+        )
+
+        writer.writeheader()
+
+        for trade in trades:
+
+            writer.writerow(
+                {
+                    "entry_time":
+                        trade.entry_time,
+
+                    "exit_time":
+                        trade.exit_time,
+
+                    "side":
+                        trade.side,
+
+                    "entry_price":
+                        trade.entry_price,
+
+                    "exit_price":
+                        trade.exit_price,
+
+                    "quantity":
+                        trade.quantity,
+
+                    "gross_pnl":
+                        trade.gross_pnl,
+
+                    "fees":
+                        trade.fees,
+
+                    "slippage_cost":
+                        trade.slippage_cost,
+
+                    "net_pnl":
+                        trade.net_pnl,
+
+                    "exit_reason":
+                        trade.exit_reason,
+
+                    "holding_seconds":
+                        trade.holding_seconds,
+                }
+            )
+
+
+# ============================================================
+# SMOKE TEST
+# ============================================================
+
+def main() -> None:
+
+    print()
+    print("=" * 72)
+    print(
+        "       DELTA BACKTEST ENGINE - PHASE 7.1"
+    )
+    print("=" * 72)
+
+    print(
+        f"Dataset: {DATASET_FILE}"
+    )
+
+    print(
+        "Mode: HISTORICAL SIMULATION ONLY"
+    )
+
+    print(
+        "Live orders: DISABLED"
+    )
+
+    print()
+
+    # --------------------------------------------------------
+    # Load
+    # --------------------------------------------------------
+
+    bars = load_market_data()
+
+    if len(bars) < 2:
+
+        raise RuntimeError(
+            "Not enough market observations "
+            "for backtesting."
+        )
+
+    # --------------------------------------------------------
+    # Signals
+    # --------------------------------------------------------
+
+    signals = generate_test_signals(
+        bars
+    )
+
+    # --------------------------------------------------------
+    # Engine
+    # --------------------------------------------------------
+
+    config = BacktestConfig()
+
+    engine = BacktestEngine(
+        config
+    )
+
+    engine.run(
+        bars,
+        signals,
+    )
+
+    metrics = engine.metrics()
+
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
+
+    save_trades(
+        engine.trades
+    )
+
+    # --------------------------------------------------------
+    # Results
+    # --------------------------------------------------------
+
+    print(
+        "=" * 72
+    )
+
+    print(
+        "BACKTEST ENGINE SMOKE TEST"
+    )
+
+    print(
+        "=" * 72
+    )
+
+    print(
+        f"Market bars:       {len(bars)}"
+    )
+
+    print(
+        f"Trades:             "
+        f"{metrics['total_trades']}"
+    )
+
+    print(
+        f"Starting capital:   "
+        f"{metrics['starting_capital']:.2f}"
+    )
+
+    print(
+        f"Ending capital:     "
+        f"{metrics['ending_capital']:.2f}"
+    )
+
+    print(
+        f"Net P&L:            "
+        f"{metrics['net_pnl']:.6f}"
+    )
+
+    print(
+        f"Return:             "
+        f"{metrics['return_pct']:.6f}%"
+    )
+
+    print(
+        f"Win rate:           "
+        f"{metrics['win_rate'] * 100.0:.2f}%"
+    )
+
+    print(
+        f"Profit factor:      "
+        f"{metrics['profit_factor']}"
+    )
+
+    print(
+        f"Fees:               "
+        f"{metrics['total_fees']:.6f}"
+    )
+
+    print(
+        f"Slippage cost:      "
+        f"{metrics['total_slippage']:.6f}"
+    )
+
+    print(
+        f"Max drawdown:       "
+        f"{metrics['max_drawdown']:.6f}"
+    )
+
+    print(
+        f"Max drawdown %:     "
+        f"{metrics['max_drawdown_pct']:.6f}%"
+    )
+
+    print(
+        f"Average trade:      "
+        f"{metrics['average_trade']:.6f}"
+    )
+
+    print(
+        f"Trade file:         "
+        f"{RESULT_FILE}"
+    )
+
+    print()
+
+    print(
+        "IMPORTANT:"
+    )
+
+    print(
+        "The temporary signal generator is "
+        "only a smoke test."
+    )
+
+    print(
+        "Its result must NOT be interpreted "
+        "as strategy performance."
+    )
+
+    print(
+        "Real strategies will be implemented "
+        "in Phase 7.2+."
+    )
+
+    print()
+
+    print(
+        "=" * 72
+    )
+
+    print(
+        "                 PHASE 7.1 COMPLETE"
+    )
+
+    print(
+        "=" * 72
+    )
+
+
+if __name__ == "__main__":
+    main()

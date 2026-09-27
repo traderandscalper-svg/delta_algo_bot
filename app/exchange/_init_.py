@@ -1,0 +1,1 @@
+self.logger = logging.getLogger("DeltaRestClient")
