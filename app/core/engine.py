@@ -4860,29 +4860,36 @@ class TradingEngine:
 
             self.delta.test_rest_connection()
 
-            balances = (
-                self.delta
-                .test_private_rest_connection()
-            )
-
-            equity = (
-                self._extract_equity(
-                    balances
+            if self.settings.trading_mode.value == "PAPER":
+                equity = self.settings.paper_starting_equity
+                self.logger.info(
+                    "PAPER mode | private Delta REST skipped | "
+                    "starting_equity=%.8f",
+                    equity,
                 )
-            )
-
-            self.logger.info(
-                "Account equity initialized | "
-                "equity=%.8f",
-                equity,
-            )
-
-            if equity <= 0:
-
-                raise RuntimeError(
-                    "Unable to initialize "
-                    "positive account equity."
+            else:
+                balances = (
+                    self.delta
+                    .test_private_rest_connection()
                 )
+
+                equity = (
+                    self._extract_equity(
+                        balances
+                    )
+                )
+
+                self.logger.info(
+                    "Account equity initialized | "
+                    "equity=%.8f",
+                    equity,
+                )
+
+                if equity <= 0:
+                    raise RuntimeError(
+                        "Unable to initialize "
+                        "positive account equity."
+                    )
 
             self.risk_engine = (
                 RiskEngine(
