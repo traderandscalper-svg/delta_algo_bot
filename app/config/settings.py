@@ -93,6 +93,10 @@ class Settings(BaseSettings):
 
     enable_live_trading: bool = False
 
+    # Explicit production acknowledgement. This must be set locally and is
+    # never enabled by the repository defaults.
+    live_trading_confirmation: str = ""
+
     heartbeat_interval_seconds: int = Field(
         default=10,
         ge=1,
@@ -151,6 +155,10 @@ class Settings(BaseSettings):
             if not self.enable_live_trading:
                 raise ValueError(
                     "LIVE mode requested but ENABLE_LIVE_TRADING=false."
+                )
+            if self.live_trading_confirmation != "I_UNDERSTAND_REAL_MONEY":
+                raise ValueError(
+                    "LIVE mode requires LIVE_TRADING_CONFIRMATION=I_UNDERSTAND_REAL_MONEY."
                 )
             if not self.delta_rest_url or "api.india.delta.exchange" not in self.delta_rest_url:
                 raise ValueError("LIVE mode requires Delta India production REST URL.")
