@@ -18,7 +18,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
-from app.ml.model import MLModel\nfrom app.config.settings import Settings
+from app.ml.model import MLModel
+from app.config.settings import Settings
 
 
 logger = logging.getLogger("MLTrainer")
