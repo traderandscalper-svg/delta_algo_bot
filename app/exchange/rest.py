@@ -367,6 +367,44 @@ class DeltaRestClient:
         )
 
     # ============================================================
+    # LIVE TRADING ORDERS
+    # ============================================================
+
+    def place_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
+        """Place one authenticated Delta production/testnet order."""
+        if not isinstance(order, dict):
+            raise ValueError("order must be a dictionary")
+        return self.request(
+            method="POST",
+            path="/v2/orders",
+            json_body=order,
+            authenticated=True,
+        )
+
+    def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        return self.request(
+            method="DELETE",
+            path=f"/v2/orders/{order_id}",
+            authenticated=True,
+        )
+
+    def get_order(self, order_id: str) -> Dict[str, Any]:
+        return self.request(
+            method="GET",
+            path=f"/v2/orders/{order_id}",
+            authenticated=True,
+        )
+
+    def get_order_history(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        params = {"product_symbol": symbol} if symbol else None
+        return self.request(
+            method="GET",
+            path="/v2/orders/history",
+            params=params,
+            authenticated=True,
+        )
+
+    # ============================================================
     # CONNECTION TESTS
     # ============================================================
 
