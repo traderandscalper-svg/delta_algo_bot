@@ -73,6 +73,13 @@ class Settings(BaseSettings):
         ge=1,
     )
 
+    # Delta India futures fee model. Rates are decimals:
+    # 0.0005 = 0.05% taker, 0.0002 = 0.02% maker.
+    # Market orders are treated as taker orders by default.
+    taker_fee_rate: float = Field(default=0.0005, ge=0, le=0.01)
+    maker_fee_rate: float = Field(default=0.0002, ge=0, le=0.01)
+    trading_fee_gst_rate: float = Field(default=0.18, ge=0, le=1)
+
     paper_starting_equity: float = Field(
         default=10_000.0,
         gt=0,
