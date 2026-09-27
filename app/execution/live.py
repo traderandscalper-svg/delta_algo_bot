@@ -14,12 +14,13 @@ class LiveExecutionEngine:
     the exchange order IDs for recovery/audit.
     """
 
-    def __init__(self, rest_client, instrument_manager, risk_engine, result_handler=None, execution_mode="LIVE", taker_fee_rate=0.0005, maker_fee_rate=0.0002, gst_rate=0.18):
+    def __init__(self, rest_client, instrument_manager, risk_engine, result_handler=None, execution_mode="LIVE", taker_fee_rate=0.0005, maker_fee_rate=0.0002, gst_rate=0.18, allow_exchange_orders=True):
         self.rest = rest_client
         self.instruments = instrument_manager
         self.risk_engine = risk_engine
         self.result_handler = result_handler
         self.execution_mode = str(execution_mode).upper()
+        self.allow_exchange_orders = bool(allow_exchange_orders)
         self.taker_fee_rate = max(float(taker_fee_rate), 0.0)
         self.maker_fee_rate = max(float(maker_fee_rate), 0.0)
         self.gst_rate = max(float(gst_rate), 0.0)
@@ -321,6 +322,19 @@ class LiveExecutionEngine:
 
         estimated_entry_fee = self._estimate_trading_fee(symbol, contract_size, entry_reference, maker=False)
         estimated_entry_gst = estimated_entry_fee * self.gst_rate
+
+        if not self.allow_exchange_orders:
+            self.logger.warning(
+                "EXCHANGE EXECUTION DISABLED | mode=%s | symbol=%s | side=%s | no Delta order will be sent",
+                self.execution_mode, symbol, side,
+            )
+            self.logger.warning(
+                "WOULD SEND ORDER | symbol=%s | side=%s | contracts=%d | entry_reference=%.8f | stop_loss=%.8f | take_profit=%.8f | estimated_notional=%.8f | estimated_fee=%.8f | estimated_fee_gst=%.8f",
+                symbol, side, int(contract_size), entry_reference, reference_stop, reference_target,
+                self._notional(symbol, contract_size, entry_reference), estimated_entry_fee, estimated_entry_gst,
+            )
+            return False, "EXCHANGE_EXECUTION_DISABLED_DRY_RUN"
+
         execution = self._place_market(
             symbol, side, contract_size, False, reference_stop, reference_target,
             max(entry_reference * 0.0005, 0.01),
