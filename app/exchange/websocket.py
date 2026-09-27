@@ -102,6 +102,24 @@ class DeltaPublicWebSocket:
                 ],
             },
             {
+                "name": "ob_l2",
+                "symbols": [
+                    "BTCUSD"
+                ],
+            },
+            {
+                "name": "mark_price",
+                "symbols": [
+                    "MARK:BTCUSD"
+                ],
+            },
+            {
+                "name": "funding_rate",
+                "symbols": [
+                    "BTCUSD"
+                ],
+            },
+            {
                 "name": "system_status",
             },
         ])
