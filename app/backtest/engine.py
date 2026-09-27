@@ -1544,7 +1544,7 @@ def main() -> None:
 
     print("=" * 72)
     print(f"Signal mode:        {signal_mode}")
-    print(f"Evaluation set:     {"HOLDOUT 20%" if test_only else "ALL DATA"}")
+    print("Evaluation set:     " + ("HOLDOUT 20%" if test_only else "ALL DATA"))
     print(f"Starting capital:   {metrics['starting_capital']:.8f}")
     print(f"Ending capital:     {metrics['ending_capital']:.8f}")
     print(f"Net PnL:            {metrics['net_pnl']:.8f}")
