@@ -192,6 +192,18 @@ class MarketDataCollector:
                         "symbols": self.symbols,
                     },
                     {
+                        "name": "ob_l2",
+                        "symbols": self.symbols,
+                    },
+                    {
+                        "name": "mark_price",
+                        "symbols": [f"MARK:{symbol}" for symbol in self.symbols],
+                    },
+                    {
+                        "name": "funding_rate",
+                        "symbols": self.symbols,
+                    },
+                    {
                         "name": "system_status",
                     },
                 ]
