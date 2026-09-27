@@ -87,7 +87,9 @@ class LiveExecutionEngine:
         if quantity <= 0:
             return False, quantity_reason
 
-        response = self._place_market(symbol, side, quantity, False)
+        reference_stop = entry_reference * (1 - stop_pct) if side == "BUY" else entry_reference * (1 + stop_pct)
+        reference_target = entry_reference * (1 + target_pct) if side == "BUY" else entry_reference * (1 - target_pct)
+        response = self._place_market(symbol, side, quantity, False, reference_stop, reference_target, max(entry_reference * 0.0005, 0.01))
         result = response.get("result", {}) if isinstance(response, dict) else {}
         order_id = str(result.get("id", ""))
 
