@@ -62,6 +62,8 @@ class MarketDataEvent:
             "ob_l2",
             "ob_updates",
             "trades",
+            "mark_price",
+            "funding_rate",
         }
 
     @property
@@ -162,6 +164,8 @@ class MarketDataStats:
     ticker_messages: int = 0
     orderbook_messages: int = 0
     trade_messages: int = 0
+    mark_price_messages: int = 0
+    funding_rate_messages: int = 0
     system_messages: int = 0
 
     unknown_messages: int = 0
@@ -227,6 +231,12 @@ class MarketDataStats:
                 self.trade_valid_messages += 1
             else:
                 self.trade_invalid_messages += 1
+
+        elif event_type == "mark_price":
+            self.mark_price_messages += 1
+
+        elif event_type == "funding_rate":
+            self.funding_rate_messages += 1
 
         elif event_type == "system_status":
 
