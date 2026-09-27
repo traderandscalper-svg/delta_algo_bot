@@ -5,7 +5,7 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional\n\nfrom app.config.settings import Settings
 
 
 # ============================================================
@@ -372,7 +372,7 @@ def load_market_data(
 
 def generate_ml_signals(
     dataset_path: Path = DATASET_FILE,
-    model_path: Path = Path("data/models/market_direction_model.joblib"),
+    model_path: Path = DATA_ROOT / "models" / "market_direction_model.joblib",
     test_only: bool = True,
 ) -> List[Optional[str]]:
     """Generate backtest signals from the trained production ML model."""
