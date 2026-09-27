@@ -5824,7 +5824,7 @@ class TradingEngine:
         try:
             self.persistence.save({
                 "saved_at": time.time(),
-                "state": self.state.value,
+                "engine_state": self.state.value,
                 "strategy_weights": dict(self.strategy_engine.strategy_weights),
                 "paper_execution": self.paper_execution.snapshot_state() if self.paper_execution else {},
                 "risk": self.risk_engine.get_stats() if self.risk_engine else {},
