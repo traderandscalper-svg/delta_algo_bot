@@ -19,6 +19,7 @@ from app.safety.watchdog import Watchdog
 from app.strategies.engine import StrategyEngine as Phase9StrategyEngine
 from app.ml.predict import MLPredictor
 from app.strategies.signal_performance_tracker import SignalPerformanceTracker
+from app.core.persistence import EnginePersistence
 
 
 # ============================================================
@@ -3842,6 +3843,96 @@ class PaperExecutionEngine:
 
     # --------------------------------------------------------
 
+    def snapshot_state(self):
+        positions = {}
+        for symbol, position in self.positions.items():
+            positions[symbol] = {
+                "symbol": position.symbol,
+                "side": position.side,
+                "quantity": position.quantity,
+                "entry_price": position.entry_price,
+                "entry_timestamp": position.entry_timestamp,
+                "stop_loss": position.stop_loss,
+                "take_profit": position.take_profit,
+                "trailing_stop": position.trailing_stop,
+                "entry_wall_time": position.entry_wall_time,
+                "highest_price": position.highest_price,
+                "lowest_price": position.lowest_price,
+                "strategy_names": list(position.strategy_names),
+                "entry_confidence": position.entry_confidence,
+                "entry_notional": position.entry_notional,
+                "unrealized_pnl": position.unrealized_pnl,
+                "max_unrealized_pnl": position.max_unrealized_pnl,
+                "min_unrealized_pnl": position.min_unrealized_pnl,
+                "initial_risk": position.initial_risk,
+                "trailing_activated": position.trailing_activated,
+                "learning_id": position.learning_id,
+                "entry_signal_action": position.entry_signal_action,
+            }
+        return {
+            "entries": self.entries,
+            "exits": self.exits,
+            "completed_trades": self.completed_trades,
+            "wins": self.wins,
+            "losses": self.losses,
+            "breakeven": self.breakeven,
+            "gross_profit": self.gross_profit,
+            "gross_loss": self.gross_loss,
+            "realized_pnl": self.realized_pnl,
+            "trade_pnls": list(self.trade_pnls[-1000:]),
+            "holding_times": list(self.holding_times[-1000:]),
+            "largest_win": self.largest_win,
+            "largest_loss": self.largest_loss,
+            "total_volume": self.total_volume,
+            "total_notional": self.total_notional,
+            "exit_reasons": dict(self.exit_reasons),
+            "last_exit_time": dict(self.last_exit_time),
+            "positions": positions,
+        }
+
+    def restore_state(self, state):
+        if not isinstance(state, dict):
+            return
+        for name in (
+            "entries", "exits", "completed_trades", "wins", "losses", "breakeven",
+            "gross_profit", "gross_loss", "realized_pnl", "largest_win",
+            "largest_loss", "total_volume", "total_notional",
+        ):
+            if name in state:
+                setattr(self, name, safe_float(state[name]) if name not in {"entries","exits","completed_trades","wins","losses","breakeven"} else int(safe_float(state[name])))
+        self.trade_pnls = [safe_float(x) for x in state.get("trade_pnls", [])][-1000:]
+        self.holding_times = [safe_float(x) for x in state.get("holding_times", [])][-1000:]
+        self.exit_reasons = {str(k): int(safe_float(v)) for k, v in state.get("exit_reasons", {}).items()}
+        self.last_exit_time = {str(k): safe_float(v) for k, v in state.get("last_exit_time", {}).items()}
+        self.positions.clear()
+        for symbol, raw in state.get("positions", {}).items():
+            try:
+                self.positions[symbol] = PaperPosition(
+                    symbol=str(raw["symbol"]),
+                    side=str(raw["side"]),
+                    quantity=safe_float(raw["quantity"]),
+                    entry_price=safe_float(raw["entry_price"]),
+                    entry_timestamp=safe_float(raw["entry_timestamp"]),
+                    stop_loss=safe_float(raw["stop_loss"]),
+                    take_profit=safe_float(raw["take_profit"]),
+                    trailing_stop=safe_float(raw.get("trailing_stop")),
+                    entry_wall_time=safe_float(raw.get("entry_wall_time")),
+                    highest_price=safe_float(raw.get("highest_price")),
+                    lowest_price=safe_float(raw.get("lowest_price")),
+                    strategy_names=list(raw.get("strategy_names", [])),
+                    entry_confidence=safe_float(raw.get("entry_confidence")),
+                    entry_notional=safe_float(raw.get("entry_notional")),
+                    unrealized_pnl=safe_float(raw.get("unrealized_pnl")),
+                    max_unrealized_pnl=safe_float(raw.get("max_unrealized_pnl")),
+                    min_unrealized_pnl=safe_float(raw.get("min_unrealized_pnl")),
+                    initial_risk=safe_float(raw.get("initial_risk")),
+                    trailing_activated=bool(raw.get("trailing_activated", False)),
+                    learning_id=str(raw.get("learning_id", "")),
+                    entry_signal_action=str(raw.get("entry_signal_action", "HOLD")),
+                )
+            except Exception:
+                self.logger.exception("Unable to restore paper position: %s", symbol)
+
     def get_stats(self):
 
         total = (
@@ -4672,6 +4763,8 @@ class TradingEngine:
         )
 
         self.signal_performance_tracker = SignalPerformanceTracker()
+        self.persistence = EnginePersistence()
+        self.recovery_state = self.persistence.load()
 
         self.learning_engine = (
             LearningEngine()
@@ -4823,6 +4916,15 @@ class TradingEngine:
                     ),
                 )
             )
+
+            if self.recovery_state.get("paper_execution"):
+                self.paper_execution.restore_state(self.recovery_state["paper_execution"])
+
+            restored_weights = self.recovery_state.get("strategy_weights")
+            if isinstance(restored_weights, dict):
+                for name, weight in restored_weights.items():
+                    if name in self.strategy_engine.strategy_weights:
+                        self.strategy_engine.strategy_weights[name] = clamp(safe_float(weight, 1.0), 0.50, 1.50)
 
             self.delta.load_instruments()
 
@@ -5706,11 +5808,29 @@ class TradingEngine:
             entry_notional,
         )
 
+        self._persist_runtime_state()
+
         if isinstance(metadata, dict):
             self.learning_engine.record_outcome(
                 metadata.get("learning_id", ""),
                 pnl,
             )
+
+    # ========================================================
+    # PERSISTENCE
+    # ========================================================
+
+    def _persist_runtime_state(self):
+        try:
+            self.persistence.save({
+                "saved_at": time.time(),
+                "state": self.state.value,
+                "strategy_weights": dict(self.strategy_engine.strategy_weights),
+                "paper_execution": self.paper_execution.snapshot_state() if self.paper_execution else {},
+                "risk": self.risk_engine.get_stats() if self.risk_engine else {},
+            })
+        except Exception:
+            self.logger.exception("Runtime state persistence failed.")
 
     # ========================================================
     # STATUS
@@ -6226,6 +6346,7 @@ class TradingEngine:
                     "Watchdog shutdown failed."
                 )
 
+            self._persist_runtime_state()
             self._log_final_performance()
 
             self.state = (
