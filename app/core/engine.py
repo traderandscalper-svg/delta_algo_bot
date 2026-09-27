@@ -4933,15 +4933,6 @@ class TradingEngine:
             if self.recovery_state.get("paper_execution"):
                 self.paper_execution.restore_state(self.recovery_state["paper_execution"])
             self.live_execution = None
-            if self.order_execution_enabled:
-                self.live_execution = LiveExecutionEngine(
-                    rest_client=self.delta.rest,
-                    instrument_manager=self.delta.instruments,
-                    risk_engine=self.risk_engine,
-                    result_handler=self._record_trade_result,
-                )
-                self.logger.warning("LIVE TRADING ENABLED | real Delta orders are permitted.")
-
 
             restored_weights = self.recovery_state.get("strategy_weights")
             if isinstance(restored_weights, dict):
@@ -4950,6 +4941,15 @@ class TradingEngine:
                         self.strategy_engine.strategy_weights[name] = clamp(safe_float(weight, 1.0), 0.50, 1.50)
 
             self.delta.load_instruments()
+
+            if self.order_execution_enabled:
+                self.live_execution = LiveExecutionEngine(
+                    rest_client=self.delta.rest,
+                    instrument_manager=self.delta.instruments,
+                    risk_engine=self.risk_engine,
+                    result_handler=self._record_trade_result,
+                )
+                self.logger.warning("LIVE TRADING ENABLED | real Delta orders are permitted.")
 
             self.candle_aggregator = (
                 CandleAggregator(
@@ -5691,14 +5691,8 @@ class TradingEngine:
                 )
 
                 self.logger.info(
-                    "%s SIGNAL ACCEPTED | ",
+                    "%s SIGNAL ACCEPTED | symbol=%s | action=%s | confidence=%.4f | score=%.4f | regime=%s | strategies=%s",
                     "LIVE" if self.live_execution else "PAPER",
-                    "symbol=%s | "
-                    "action=%s | "
-                    "confidence=%.4f | "
-                    "score=%.4f | "
-                    "regime=%s | "
-                    "strategies=%s",
                     features.symbol,
                     signal.action.value,
                     signal.confidence,
