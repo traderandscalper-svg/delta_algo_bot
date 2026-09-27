@@ -4114,8 +4114,8 @@ class LearningEngine:
         "signal_direction",
     )
 
-    DEFAULT_ONLINE_MODEL_PATH = "data/learning/phase9_online_model.json"
-    DEFAULT_OFFLINE_MODEL_PATH = "data/models/market_direction_model.joblib"
+    DEFAULT_ONLINE_MODEL_PATH = "learning/phase9_online_model.json"
+    DEFAULT_OFFLINE_MODEL_PATH = "models/market_direction_model.joblib"
 
     def __init__(
         self,
