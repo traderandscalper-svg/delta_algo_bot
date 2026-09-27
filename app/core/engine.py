@@ -4906,6 +4906,11 @@ class TradingEngine:
                 )
             )
 
+            restored_risk = self.recovery_state.get("risk")
+            if isinstance(restored_risk, dict):
+                self.risk_engine.daily_realized_pnl = safe_float(restored_risk.get("daily_realized_pnl"))
+                self.risk_engine.trades_today = int(safe_float(restored_risk.get("trades_today")))
+
             self.paper_execution = (
                 PaperExecutionEngine(
                     risk_engine=(
