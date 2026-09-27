@@ -1,12 +1,12 @@
 import argparse
 import logging
 import signal
+import subprocess
 import sys
+from pathlib import Path
 
 from app.config.settings import Settings
 from app.core.engine import TradingEngine
-from app.backtesting.engine import BacktestEngine, discover_market_data
-from app.ml.trainer import MLTrainer
 
 
 def configure_logging(settings: Settings) -> None:
@@ -28,44 +28,75 @@ def configure_logging(settings: Settings) -> None:
     )
 
 
-def run_backtest(settings: Settings, paths: list[str] | None = None) -> str:
-    equity = 1000.0
-    engine = BacktestEngine(
-        initial_equity=equity,
-        risk_per_trade=settings.max_risk_per_trade,
-        max_leverage=float(settings.max_leverage),
+def run_module(module: str, *args: str) -> None:
+    command = [sys.executable, "-m", module, *args]
+    print("\n$ " + " ".join(command))
+    subprocess.run(command, check=True)
+
+
+def run_research_pipeline() -> None:
+    """Build historical data -> align it -> train ML -> backtest ML signals."""
+    print("=" * 72)
+    print("        DELTA RESEARCH PIPELINE")
+    print("=" * 72)
+    print("Live orders: DISABLED")
+    print()
+
+    # 1. Build one-second intrasecond features from raw Delta JSONL.
+    run_module("app.ml.intrasecond_features")
+
+    # 2. Build multi-horizon future targets.
+    run_module("app.ml.multi_horizon_dataset")
+
+    # 3. Align current features with future targets and run leakage checks.
+    run_module("app.ml.dataset_alignment")
+
+    # 4. Train the production-compatible ML model.
+    run_module(
+        "app.ml.trainer",
+        "--dataset",
+        "data/ml/final_training_dataset.csv",
+        "--model",
+        "data/models/market_direction_model.joblib",
     )
-    data_paths = paths or discover_market_data("data/market_data")
-    if not data_paths:
-        raise FileNotFoundError(
-            "No market-data JSONL files found in data/market_data. "
-            "Run the bot in PAPER/DEMO mode first to collect historical data."
-        )
-    result = engine.run(data_paths)
-    dataset = "data/learning/backtest_dataset.jsonl"
-    engine.save_ml_dataset(dataset)
 
-    print("\n" + "=" * 60)
-    print("BACKTEST RESULT")
-    print("=" * 60)
-    for key, value in result.items():
-        print(f"{key}: {value}")
-    print(f"ml_dataset: {dataset}")
-    print("=" * 60)
-    return dataset
+    # 5. Backtest the trained model on the same chronological market dataset.
+    run_module(
+        "app.backtest.engine",
+        "--dataset",
+        "data/ml/final_training_dataset.csv",
+        "--model",
+        "data/models/market_direction_model.joblib",
+    )
+
+    print()
+    print("=" * 72)
+    print("        RESEARCH PIPELINE COMPLETE")
+    print("=" * 72)
+    print("ML model:  data/models/market_direction_model.joblib")
+    print("Metadata:  data/models/model_metadata.json")
+    print("Backtest:  data/ml/backtest_engine_test.csv")
+    print("=" * 72)
 
 
-def run_ml_training(dataset: str = "data/learning/backtest_dataset.jsonl") -> str:
-    model_path = "data/learning/backtest_model.joblib"
-    result = MLTrainer(model_path).train(dataset)
+def run_backtest() -> None:
+    run_module(
+        "app.backtest.engine",
+        "--dataset",
+        "data/ml/final_training_dataset.csv",
+        "--model",
+        "data/models/market_direction_model.joblib",
+    )
 
-    print("\n" + "=" * 60)
-    print("ML TRAINING RESULT")
-    print("=" * 60)
-    for key, value in result.__dict__.items():
-        print(f"{key}: {value}")
-    print("=" * 60)
-    return model_path
+
+def run_ml_training() -> None:
+    run_module(
+        "app.ml.trainer",
+        "--dataset",
+        "data/ml/final_training_dataset.csv",
+        "--model",
+        "data/models/market_direction_model.joblib",
+    )
 
 
 def main() -> None:
@@ -73,43 +104,33 @@ def main() -> None:
         description="Delta Algorithmic Trading Bot"
     )
     parser.add_argument(
-        "--backtest",
+        "--research",
         action="store_true",
-        help="Run the historical backtester and generate an ML dataset.",
+        help="Run dataset construction, leakage validation, ML training and ML backtest.",
     )
     parser.add_argument(
         "--train-ml",
         action="store_true",
-        help="Train the offline ML model from the backtest dataset.",
+        help="Train the production ML model from the aligned dataset.",
     )
     parser.add_argument(
-        "--pipeline",
+        "--backtest",
         action="store_true",
-        help="Run backtest followed by offline ML training.",
-    )
-    parser.add_argument(
-        "--data",
-        nargs="*",
-        default=None,
-        help="Optional JSONL market-data files for --backtest.",
-    )
-    parser.add_argument(
-        "--dataset",
-        default="data/learning/backtest_dataset.jsonl",
-        help="ML dataset path.",
+        help="Run the historical backtest using the trained ML model.",
     )
 
     args = parser.parse_args()
 
-    if args.backtest or args.pipeline or args.train_ml:
-        settings = Settings()
-        if args.backtest or args.pipeline:
-            dataset = run_backtest(settings, args.data)
-        else:
-            dataset = args.dataset
+    if args.research:
+        run_research_pipeline()
+        return
 
-        if args.train_ml or args.pipeline:
-            run_ml_training(dataset)
+    if args.train_ml:
+        run_ml_training()
+        return
+
+    if args.backtest:
+        run_backtest()
         return
 
     print("=" * 60)
