@@ -215,6 +215,7 @@ def safe_float(
 
 def load_market_data(
     path: Path = DATASET_FILE,
+    test_only: bool = True,
 ) -> List[MarketBar]:
 
     if not path.exists():
@@ -232,6 +233,27 @@ def load_market_data(
         reader = csv.DictReader(handle)
 
         rows = list(reader)
+
+    rows = [
+        row for row in rows
+        if (row.get("symbol") or SYMBOL) == SYMBOL
+    ]
+    rows.sort(
+        key=lambda row: safe_float(
+            row.get("timestamp_seconds")
+            or row.get("feature_timestamp_seconds"),
+            0.0,
+        )
+    )
+
+    if test_only:
+        split_index = int(len(rows) * 0.80)
+        rows = rows[split_index:]
+        logger.info(
+            "Using chronological ML holdout | rows=%d | start_index=%d",
+            len(rows),
+            split_index,
+        )
 
     bars: List[MarketBar] = []
 
@@ -351,6 +373,7 @@ def load_market_data(
 def generate_ml_signals(
     dataset_path: Path = DATASET_FILE,
     model_path: Path = Path("data/models/market_direction_model.joblib"),
+    test_only: bool = True,
 ) -> List[Optional[str]]:
     """Generate backtest signals from the trained production ML model."""
     from app.ml.model import MLModel
@@ -378,10 +401,15 @@ def generate_ml_signals(
         key=lambda row: safe_float(
             row.get("timestamp_us")
             or row.get("timestamp")
+            or row.get("timestamp_seconds")
             or row.get("feature_timestamp_seconds"),
             0.0,
         )
     )
+
+    if test_only:
+        split_index = int(len(filtered) * 0.80)
+        filtered = filtered[split_index:]
 
     signals: List[Optional[str]] = []
 
@@ -1451,6 +1479,11 @@ def main() -> None:
         action="store_true",
         help="Use the legacy technical smoke-test signals instead of the trained ML model.",
     )
+    parser.add_argument(
+        "--all-data",
+        action="store_true",
+        help="Evaluate the model on all rows instead of the default chronological holdout.",
+    )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset)
@@ -1466,7 +1499,8 @@ def main() -> None:
     print("Live orders:   DISABLED")
     print()
 
-    bars = load_market_data(dataset_path)
+    test_only = not args.all_data
+    bars = load_market_data(dataset_path, test_only=test_only)
 
     if len(bars) < 2:
         raise RuntimeError("Not enough market observations for backtesting.")
@@ -1475,7 +1509,11 @@ def main() -> None:
         signals = generate_test_signals(bars)
         signal_mode = "LEGACY_SMOKE_TEST"
     else:
-        signals = generate_ml_signals(dataset_path, model_path)
+        signals = generate_ml_signals(
+            dataset_path,
+            model_path,
+            test_only=test_only,
+        )
         signal_mode = "TRAINED_ML"
 
     if len(signals) != len(bars):
@@ -1499,6 +1537,7 @@ def main() -> None:
 
     print("=" * 72)
     print(f"Signal mode:        {signal_mode}")
+    print(f"Evaluation set:     {"HOLDOUT 20%" if test_only else "ALL DATA"}")
     print(f"Starting capital:   {metrics['starting_capital']:.8f}")
     print(f"Ending capital:     {metrics['ending_capital']:.8f}")
     print(f"Net PnL:            {metrics['net_pnl']:.8f}")
