@@ -4965,9 +4965,12 @@ class TradingEngine:
                     maker_fee_rate=self.settings.maker_fee_rate,
                     gst_rate=self.settings.trading_fee_gst_rate,
                 )
+                reconciliation = self.live_execution.reconcile_exchange_state()
                 self.logger.warning(
-                    "%s EXCHANGE ORDER EXECUTION ENABLED | real Delta orders are permitted.",
+                    "%s EXCHANGE ORDER EXECUTION ENABLED | real Delta orders are permitted | reconciled_positions=%d | open_orders=%d",
                     execution_mode,
+                    reconciliation["exchange_positions"],
+                    reconciliation["open_orders"],
                 )
 
             self.candle_aggregator = (
