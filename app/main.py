@@ -11,7 +11,7 @@ from app.ml.trainer import MLTrainer
 
 def configure_logging(settings: Settings) -> None:
     logging.basicConfig(
-        level=getattr(settings.log_level.upper(), "INFO"),
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format=(
             "%(asctime)s | "
             "%(levelname)-8s | "
