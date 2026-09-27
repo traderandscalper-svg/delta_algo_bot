@@ -342,6 +342,68 @@ def load_market_data(
 
 
 # ============================================================
+# ML SIGNAL GENERATION
+# ============================================================
+
+def generate_ml_signals(
+    dataset_path: Path = DATASET_FILE,
+    model_path: Path = Path("data/models/market_direction_model.joblib"),
+) -> List[Optional[str]]:
+    """Generate backtest signals from the trained production ML model."""
+    from app.ml.model import MLModel
+
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"Trained ML model not found: {model_path}. "
+            "Run the ML training pipeline first."
+        )
+
+    model = MLModel.load(model_path)
+
+    with dataset_path.open(
+        "r",
+        newline="",
+        encoding="utf-8",
+    ) as handle:
+        rows = list(csv.DictReader(handle))
+
+    filtered = [
+        row for row in rows
+        if (row.get("symbol") or SYMBOL) == SYMBOL
+    ]
+    filtered.sort(
+        key=lambda row: safe_float(
+            row.get("timestamp_us")
+            or row.get("timestamp")
+            or row.get("feature_timestamp_seconds"),
+            0.0,
+        )
+    )
+
+    signals: List[Optional[str]] = []
+
+    for row in filtered:
+        features = {}
+        for name in model.feature_names:
+            value = safe_float(row.get(name))
+            features[name] = value if value is not None else 0.0
+
+        prediction = model.predict_single(features)["prediction"]
+
+        if prediction > 0:
+            signals.append("LONG")
+        elif prediction < 0:
+            signals.append("SHORT")
+        else:
+            signals.append(None)
+
+    if len(signals) == 0:
+        raise RuntimeError("The trained ML model produced no backtest observations.")
+
+    return signals
+
+
+# ============================================================
 # EXECUTION PRICE MODEL
 # ============================================================
 
@@ -1370,193 +1432,83 @@ def save_trades(
 # ============================================================
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run the Delta historical backtest."
+    )
+    parser.add_argument("--dataset", default=str(DATASET_FILE))
+    parser.add_argument("--model", default="data/models/market_direction_model.joblib")
+    parser.add_argument("--capital", type=float, default=DEFAULT_INITIAL_CAPITAL)
+    parser.add_argument("--fee-rate", type=float, default=DEFAULT_FEE_RATE)
+    parser.add_argument("--slippage-bps", type=float, default=DEFAULT_SLIPPAGE_BPS)
+    parser.add_argument("--stop-loss", type=float, default=DEFAULT_STOP_LOSS_PCT)
+    parser.add_argument("--take-profit", type=float, default=DEFAULT_TAKE_PROFIT_PCT)
+    parser.add_argument("--max-hold", type=int, default=DEFAULT_MAX_HOLD_SECONDS)
+    parser.add_argument(
+        "--smoke-signals",
+        action="store_true",
+        help="Use the legacy technical smoke-test signals instead of the trained ML model.",
+    )
+    args = parser.parse_args()
+
+    dataset_path = Path(args.dataset)
+    model_path = Path(args.model)
 
     print()
     print("=" * 72)
-    print(
-        "       DELTA BACKTEST ENGINE - PHASE 7.1"
-    )
+    print("       DELTA ML-INTEGRATED BACKTEST ENGINE")
     print("=" * 72)
-
-    print(
-        f"Dataset: {DATASET_FILE}"
-    )
-
-    print(
-        "Mode: HISTORICAL SIMULATION ONLY"
-    )
-
-    print(
-        "Live orders: DISABLED"
-    )
-
+    print(f"Dataset:       {dataset_path}")
+    print(f"ML model:      {model_path}")
+    print("Mode:          HISTORICAL SIMULATION ONLY")
+    print("Live orders:   DISABLED")
     print()
 
-    # --------------------------------------------------------
-    # Load
-    # --------------------------------------------------------
-
-    bars = load_market_data()
+    bars = load_market_data(dataset_path)
 
     if len(bars) < 2:
+        raise RuntimeError("Not enough market observations for backtesting.")
 
+    if args.smoke_signals:
+        signals = generate_test_signals(bars)
+        signal_mode = "LEGACY_SMOKE_TEST"
+    else:
+        signals = generate_ml_signals(dataset_path, model_path)
+        signal_mode = "TRAINED_ML"
+
+    if len(signals) != len(bars):
         raise RuntimeError(
-            "Not enough market observations "
-            "for backtesting."
+            f"Signal/bar length mismatch: {len(signals)} != {len(bars)}"
         )
 
-    # --------------------------------------------------------
-    # Signals
-    # --------------------------------------------------------
-
-    signals = generate_test_signals(
-        bars
+    config = BacktestConfig(
+        initial_capital=args.capital,
+        fee_rate=args.fee_rate,
+        slippage_bps=args.slippage_bps,
+        stop_loss_pct=args.stop_loss,
+        take_profit_pct=args.take_profit,
+        max_hold_seconds=args.max_hold,
     )
 
-    # --------------------------------------------------------
-    # Engine
-    # --------------------------------------------------------
-
-    config = BacktestConfig()
-
-    engine = BacktestEngine(
-        config
-    )
-
-    engine.run(
-        bars,
-        signals,
-    )
-
+    engine = BacktestEngine(config)
+    engine.run(bars, signals)
     metrics = engine.metrics()
+    save_trades(engine.trades)
 
-    # --------------------------------------------------------
-    # Save
-    # --------------------------------------------------------
-
-    save_trades(
-        engine.trades
-    )
-
-    # --------------------------------------------------------
-    # Results
-    # --------------------------------------------------------
-
-    print(
-        "=" * 72
-    )
-
-    print(
-        "BACKTEST ENGINE SMOKE TEST"
-    )
-
-    print(
-        "=" * 72
-    )
-
-    print(
-        f"Market bars:       {len(bars)}"
-    )
-
-    print(
-        f"Trades:             "
-        f"{metrics['total_trades']}"
-    )
-
-    print(
-        f"Starting capital:   "
-        f"{metrics['starting_capital']:.2f}"
-    )
-
-    print(
-        f"Ending capital:     "
-        f"{metrics['ending_capital']:.2f}"
-    )
-
-    print(
-        f"Net P&L:            "
-        f"{metrics['net_pnl']:.6f}"
-    )
-
-    print(
-        f"Return:             "
-        f"{metrics['return_pct']:.6f}%"
-    )
-
-    print(
-        f"Win rate:           "
-        f"{metrics['win_rate'] * 100.0:.2f}%"
-    )
-
-    print(
-        f"Profit factor:      "
-        f"{metrics['profit_factor']}"
-    )
-
-    print(
-        f"Fees:               "
-        f"{metrics['total_fees']:.6f}"
-    )
-
-    print(
-        f"Slippage cost:      "
-        f"{metrics['total_slippage']:.6f}"
-    )
-
-    print(
-        f"Max drawdown:       "
-        f"{metrics['max_drawdown']:.6f}"
-    )
-
-    print(
-        f"Max drawdown %:     "
-        f"{metrics['max_drawdown_pct']:.6f}%"
-    )
-
-    print(
-        f"Average trade:      "
-        f"{metrics['average_trade']:.6f}"
-    )
-
-    print(
-        f"Trade file:         "
-        f"{RESULT_FILE}"
-    )
-
-    print()
-
-    print(
-        "IMPORTANT:"
-    )
-
-    print(
-        "The temporary signal generator is "
-        "only a smoke test."
-    )
-
-    print(
-        "Its result must NOT be interpreted "
-        "as strategy performance."
-    )
-
-    print(
-        "Real strategies will be implemented "
-        "in Phase 7.2+."
-    )
-
-    print()
-
-    print(
-        "=" * 72
-    )
-
-    print(
-        "                 PHASE 7.1 COMPLETE"
-    )
-
-    print(
-        "=" * 72
-    )
+    print("=" * 72)
+    print(f"Signal mode:        {signal_mode}")
+    print(f"Starting capital:   {metrics['starting_capital']:.8f}")
+    print(f"Ending capital:     {metrics['ending_capital']:.8f}")
+    print(f"Net PnL:            {metrics['net_pnl']:.8f}")
+    print(f"Return:             {metrics['return_pct']:.4f}%")
+    print(f"Trades:             {int(metrics['total_trades'])}")
+    print(f"Win rate:           {metrics['win_rate'] * 100.0:.2f}%")
+    print(f"Profit factor:      {metrics['profit_factor']}")
+    print(f"Max drawdown:       {metrics['max_drawdown']:.8f}")
+    print(f"Max drawdown %:     {metrics['max_drawdown_pct']:.4f}%")
+    print(f"Fees:               {metrics['total_fees']:.8f}")
+    print(f"Slippage cost:      {metrics['total_slippage']:.8f}")
+    print(f"Trade output:       {RESULT_FILE}")
+    print("=" * 72)
 
 
 if __name__ == "__main__":
