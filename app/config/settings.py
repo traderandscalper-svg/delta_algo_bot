@@ -1,5 +1,6 @@
 from enum import Enum
 from pathlib import Path
+import os
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -101,6 +102,9 @@ class Settings(BaseSettings):
 
     log_directory: str = "logs"
 
+    # Persistent market/ML/runtime data. On Windows this defaults to E:\\delta_algo_bot_data.
+    data_directory: str = os.environ.get("DELTA_DATA_DIRECTORY", r"E:\\delta_algo_bot_data")
+
     @field_validator("delta_rest_url", "delta_public_ws_url", "delta_private_ws_url")
     @classmethod
     def remove_trailing_slash(cls, value: str) -> str:
@@ -153,6 +157,10 @@ class Settings(BaseSettings):
                 "MAX_RISK_PER_TRADE cannot exceed MAX_DAILY_LOSS."
             )
 
+        Path(self.data_directory).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
         Path(self.log_directory).mkdir(
             parents=True,
             exist_ok=True,
