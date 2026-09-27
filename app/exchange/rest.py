@@ -392,6 +392,24 @@ class DeltaRestClient:
             authenticated=True,
         )
 
+    def get_order_by_client_order_id(self, client_order_id: str) -> Dict[str, Any]:
+        """Retrieve the latest exchange state for a bot-generated client order id."""
+        return self.request(
+            method="GET",
+            path=f"/v2/orders/client_order_id/{client_order_id}",
+            authenticated=True,
+        )
+
+    def get_fills(self, product_symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Retrieve authenticated fills for post-order verification."""
+        params = {"product_symbol": product_symbol} if product_symbol else None
+        return self.request(
+            method="GET",
+            path="/v2/fills",
+            params=params,
+            authenticated=True,
+        )
+
     def get_order_history(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         params = {"product_symbol": symbol} if symbol else None
         return self.request(
