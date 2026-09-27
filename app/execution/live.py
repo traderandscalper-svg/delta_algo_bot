@@ -14,12 +14,13 @@ class LiveExecutionEngine:
     the exchange order IDs for recovery/audit.
     """
 
-    def __init__(self, rest_client, instrument_manager, risk_engine, result_handler=None):
+    def __init__(self, rest_client, instrument_manager, risk_engine, result_handler=None, execution_mode="LIVE"):
         self.rest = rest_client
         self.instruments = instrument_manager
         self.risk_engine = risk_engine
         self.result_handler = result_handler
-        self.logger = logging.getLogger("LiveExecutionEngine")
+        self.execution_mode = str(execution_mode).upper()
+        self.logger = logging.getLogger("ExchangeExecutionEngine")
         self.positions: dict[str, dict[str, Any]] = {}
         self.orders: dict[str, dict[str, Any]] = {}
 
@@ -36,12 +37,44 @@ class LiveExecutionEngine:
             raise RuntimeError(f"Delta product id missing: {symbol}")
         return int(product_id)
 
+    def _contract_value(self, symbol: str) -> float:
+        product = self.instruments.get(symbol)
+        if not product:
+            raise RuntimeError(f"Delta product not loaded: {symbol}")
+        value = float(product.get("contract_value") or 0.0)
+        if value <= 0:
+            raise RuntimeError(f"Delta contract_value missing/invalid: {symbol}")
+        return value
+
+    def _contract_size(self, symbol: str, base_quantity: float, price: float) -> int:
+        """Convert risk-engine base-asset quantity into Delta derivative contracts."""
+        contract_value = self._contract_value(symbol)
+        if base_quantity <= 0 or price <= 0:
+            return 0
+
+        # RiskEngine quantities are expressed in underlying units (e.g. BTC).
+        # Delta derivative orders use integer contract counts.
+        contracts_from_risk = int(base_quantity / contract_value)
+
+        # Preserve the leverage/notional cap after integer rounding.
+        max_notional = float(self.risk_engine.account_equity) * float(self.risk_engine.max_leverage)
+        max_contracts = int(max_notional / (price * contract_value))
+
+        contracts = min(contracts_from_risk, max_contracts)
+
+        # A one-contract position is allowed when it remains inside the
+        # configured notional cap; otherwise there is no valid order.
+        if contracts <= 0 and max_contracts >= 1:
+            contracts = 1
+
+        return max(contracts, 0)
+
     def _place_market(self, symbol: str, side: str, size: float, reduce_only: bool = False, stop_loss: float = 0.0, take_profit: float = 0.0, trail_amount: float = 0.0):
         if size <= 0:
             raise ValueError("Order size must be positive")
         payload = {
             "product_id": self._product_id(symbol),
-            "size": int(size) if float(size).is_integer() else size,
+            "size": int(size),
             "side": side.lower(),
             "order_type": "market_order",
             "reduce_only": bool(reduce_only),
@@ -54,6 +87,8 @@ class LiveExecutionEngine:
             if trail_amount > 0:
                 payload["bracket_trail_amount"] = str(trail_amount)
         response = self.rest.place_order(payload)
+        if not isinstance(response, dict) or response.get("success") is False:
+            raise RuntimeError(f"Delta order rejected: {response}")
         self.orders[str(response.get("result", {}).get("id", payload["client_order_id"]))] = response
         return response
 
@@ -89,7 +124,19 @@ class LiveExecutionEngine:
 
         reference_stop = entry_reference * (1 - stop_pct) if side == "BUY" else entry_reference * (1 + stop_pct)
         reference_target = entry_reference * (1 + target_pct) if side == "BUY" else entry_reference * (1 - target_pct)
-        response = self._place_market(symbol, side, quantity, False, reference_stop, reference_target, max(entry_reference * 0.0005, 0.01))
+        contract_size = self._contract_size(symbol, quantity, entry_reference)
+        if contract_size <= 0:
+            return False, "ORDER_SIZE_BELOW_DELTA_MINIMUM_OR_MARGIN_CAP"
+
+        response = self._place_market(
+            symbol,
+            side,
+            contract_size,
+            False,
+            reference_stop,
+            reference_target,
+            max(entry_reference * 0.0005, 0.01),
+        )
         result = response.get("result", {}) if isinstance(response, dict) else {}
         order_id = str(result.get("id", ""))
 
@@ -104,7 +151,9 @@ class LiveExecutionEngine:
         self.positions[symbol] = {
             "symbol": symbol,
             "side": side,
-            "quantity": float(quantity),
+            "quantity": int(contract_size),
+            "base_quantity": float(quantity),
+            "contract_value": self._contract_value(symbol),
             "entry_price": entry_price,
             "stop_loss": stop,
             "take_profit": target,
@@ -115,23 +164,32 @@ class LiveExecutionEngine:
         }
         self.risk_engine.record_trade()
         self.logger.warning(
-            "LIVE ENTRY SENT | symbol=%s side=%s quantity=%s entry=%.8f order_id=%s stop=%.8f target=%.8f",
-            symbol, side, quantity, entry_price, order_id, stop, target,
+            "%s ENTRY SENT | symbol=%s side=%s contracts=%s base_quantity=%.8f entry=%.8f order_id=%s stop=%.8f target=%.8f",
+            self.execution_mode,
+            symbol,
+            side,
+            contract_size,
+            quantity,
+            entry_price,
+            order_id,
+            stop,
+            target,
         )
-        return True, "LIVE_ENTRY_ACCEPTED"
+        return True, f"{self.execution_mode}_ENTRY_ACCEPTED"
 
     def close_position(self, symbol: str, features, reason: str = "EXIT"):
         position = self.positions.get(symbol)
         if not position:
             return False, "NO_POSITION"
         side = "SELL" if position["side"] == "BUY" else "BUY"
-        response = self._place_market(symbol, side, position["quantity"], True)
+        response = self._place_market(symbol, side, int(position["quantity"]), True)
         result = response.get("result", {}) if isinstance(response, dict) else {}
         exit_price = float(result.get("average_fill_price") or result.get("price") or (features.bid if side == "SELL" else features.ask))
+        contract_value = float(position.get("contract_value") or self._contract_value(symbol))
         if position["side"] == "BUY":
-            pnl = (exit_price - position["entry_price"]) * position["quantity"]
+            pnl = (exit_price - position["entry_price"]) * position["quantity"] * contract_value
         else:
-            pnl = (position["entry_price"] - exit_price) * position["quantity"]
+            pnl = (position["entry_price"] - exit_price) * position["quantity"] * contract_value
         self.risk_engine.record_pnl(pnl)
         metadata = dict(position)
         metadata.update({"exit_price": exit_price, "reason": reason, "exit_timestamp": time.time()})
@@ -142,7 +200,7 @@ class LiveExecutionEngine:
             symbol, side, position["quantity"], exit_price, pnl, reason,
         )
         del self.positions[symbol]
-        return True, "LIVE_EXIT_ACCEPTED"
+        return True, f"{self.execution_mode}_EXIT_ACCEPTED"
 
     def process_market_price(self, symbol: str, bid: float, ask: float):
         position = self.positions.get(symbol)
@@ -168,7 +226,12 @@ class LiveExecutionEngine:
                 self.logger.exception("LIVE emergency close failed | symbol=%s", symbol)
 
     def get_stats(self):
-        return {"live": True, "positions": {k: dict(v) for k, v in self.positions.items()}, "orders": len(self.orders)}
+        return {
+            "exchange_execution": True,
+            "execution_mode": self.execution_mode,
+            "positions": {k: dict(v) for k, v in self.positions.items()},
+            "orders": len(self.orders),
+        }
 
     def snapshot_state(self):
         return {"positions": self.positions, "orders": self.orders}
