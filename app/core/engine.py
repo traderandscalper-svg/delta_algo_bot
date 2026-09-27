@@ -437,11 +437,15 @@ class FeatureEngine:
     # --------------------------------------------------------
 
     def _process_mark_price(self, payload: dict[str, Any]) -> None:
+        if isinstance(payload.get("d"), list) and payload["d"] and isinstance(payload["d"][0], dict):
+            payload = payload["d"][0]
         value = safe_float(payload.get("p", payload.get("mark_price", payload.get("price"))))
         if value > 0:
             self.latest_market_context["mark_price"] = value
 
     def _process_funding_rate(self, payload: dict[str, Any]) -> None:
+        if isinstance(payload.get("d"), list) and payload["d"] and isinstance(payload["d"][0], dict):
+            payload = payload["d"][0]
         rate = safe_float(payload.get("fr", payload.get("funding_rate")))
         if math.isfinite(rate):
             self.latest_market_context["funding_rate"] = rate
