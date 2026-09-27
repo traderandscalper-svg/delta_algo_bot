@@ -395,7 +395,14 @@ def generate_ml_signals(
 
     filtered = [
         row for row in rows
-        if (row.get("symbol") or SYMBOL) == SYMBOL
+        if (
+            (row.get("symbol") or SYMBOL) == SYMBOL
+            and safe_float(row.get("timestamp_seconds") or row.get("feature_timestamp_seconds")) is not None
+            and safe_float(row.get("bid_close")) is not None
+            and safe_float(row.get("ask_close")) is not None
+            and safe_float(row.get("mid_close")) is not None
+            and safe_float(row.get("spread_close")) is not None
+        )
     ]
     filtered.sort(
         key=lambda row: safe_float(
