@@ -82,6 +82,8 @@ class Settings(BaseSettings):
     # Safety
     # --------------------------------------------------------
 
+    enable_demo_trading: bool = False
+
     enable_live_trading: bool = False
 
     heartbeat_interval_seconds: int = Field(
