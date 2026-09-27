@@ -995,7 +995,7 @@ class FeatureEngine:
             ask=ask,
             bid_size=bid_size,
             ask_size=ask_size,
-            mark_price=safe_float(self.latest_market_context.get("mark_price"), price),
+            mark_price=safe_float(self.latest_market_context.get("mark_price"), close),
             funding_rate=safe_float(self.latest_market_context.get("funding_rate")),
             open_interest=safe_float(self.latest_market_context.get("open_interest")),
             open_interest_change=safe_float(self.latest_market_context.get("open_interest_change")),
