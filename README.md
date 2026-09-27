@@ -41,7 +41,7 @@ Open PowerShell in this folder:
     .\.venv\Scripts\python.exe -m pip install --upgrade pip
     .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-Then edit .env and replace YOUR_DELTA_API_KEY and YOUR_DELTA_API_SECRET with your Delta Exchange India DEMO/TESTNET credentials.
+For DEMO mode, edit .env and replace YOUR_DELTA_API_KEY and YOUR_DELTA_API_SECRET with your Delta Exchange India DEMO/TESTNET credentials. For credential-free paper testing, set TRADING_MODE=PAPER and use PAPER_STARTING_EQUITY; the bot still uses real public Delta market data.
 
 ## Collect real market data
 
