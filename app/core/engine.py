@@ -45,7 +45,7 @@ from app.execution.live import LiveExecutionEngine
 # Autonomous monitoring
 #
 # IMPORTANT:
-# Real exchange order execution is intentionally disabled.
+# Exchange execution is opt-in and controlled by the explicit settings switches.
 # ============================================================
 
 
@@ -4961,6 +4961,9 @@ class TradingEngine:
                     risk_engine=self.risk_engine,
                     result_handler=self._record_trade_result,
                     execution_mode=execution_mode,
+                    taker_fee_rate=self.settings.taker_fee_rate,
+                    maker_fee_rate=self.settings.maker_fee_rate,
+                    gst_rate=self.settings.trading_fee_gst_rate,
                 )
                 self.logger.warning(
                     "%s EXCHANGE ORDER EXECUTION ENABLED | real Delta orders are permitted.",
