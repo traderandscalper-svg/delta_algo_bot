@@ -3746,6 +3746,7 @@ class PaperExecutionEngine:
                         "symbol": position.symbol,
                         "side": position.side,
                         "entry_price": position.entry_price,
+                        "entry_notional": position.entry_notional,
                         "exit_price": exit_price,
                         "entry_timestamp": position.entry_timestamp,
                         "exit_timestamp": time.time(),
@@ -4136,6 +4137,41 @@ class PortfolioAnalytics:
 
         self.current_drawdown = 0.0
 
+        self.trade_count = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
+        self.total_profit = 0.0
+        self.total_loss = 0.0
+        self.consecutive_wins = 0
+        self.consecutive_losses = 0
+        self.max_consecutive_wins = 0
+        self.max_consecutive_losses = 0
+
+    # --------------------------------------------------------
+
+    def record_trade(self, pnl, entry_notional=0.0):
+        pnl = safe_float(pnl)
+        self.trade_count += 1
+
+        if pnl > 0:
+            self.winning_trades += 1
+            self.total_profit += pnl
+            self.consecutive_wins += 1
+            self.consecutive_losses = 0
+            self.max_consecutive_wins = max(
+                self.max_consecutive_wins,
+                self.consecutive_wins,
+            )
+        elif pnl < 0:
+            self.losing_trades += 1
+            self.total_loss += abs(pnl)
+            self.consecutive_losses += 1
+            self.consecutive_wins = 0
+            self.max_consecutive_losses = max(
+                self.max_consecutive_losses,
+                self.consecutive_losses,
+            )
+
     # --------------------------------------------------------
 
     def update(
@@ -4186,10 +4222,39 @@ class PortfolioAnalytics:
 
     def get_stats(self):
 
+        total = self.trade_count
+        average_trade = (
+            self.realized_pnl / total
+            if total else 0.0
+        )
+        expectancy = (
+            (
+                self.total_profit
+                - self.total_loss
+            ) / total
+            if total else 0.0
+        )
+        profit_factor = (
+            self.total_profit / self.total_loss
+            if self.total_loss > 0 else 0.0
+        )
+
         return {
             "realized_pnl": (
                 self.realized_pnl
             ),
+            "trade_count": self.trade_count,
+            "winning_trades": self.winning_trades,
+            "losing_trades": self.losing_trades,
+            "win_rate": (
+                self.winning_trades / total
+                if total else 0.0
+            ),
+            "average_trade": average_trade,
+            "expectancy": expectancy,
+            "profit_factor": profit_factor,
+            "max_consecutive_wins": self.max_consecutive_wins,
+            "max_consecutive_losses": self.max_consecutive_losses,
 
             "peak_equity": (
                 self.peak_equity
@@ -5202,6 +5267,20 @@ class TradingEngine:
         self.strategy_validator.record_trade_result(
             strategies,
             pnl,
+        )
+
+        entry_notional = 0.0
+        if isinstance(metadata, dict):
+            entry_notional = safe_float(
+                metadata.get(
+                    "entry_notional",
+                    0.0,
+                )
+            )
+
+        self.portfolio.record_trade(
+            pnl,
+            entry_notional,
         )
 
         if isinstance(metadata, dict):
