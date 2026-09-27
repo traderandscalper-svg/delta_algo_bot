@@ -25,6 +25,8 @@ class SymbolMarketState:
     latest_ticker: Optional[Dict[str, Any]] = None
     latest_orderbook: Optional[Dict[str, Any]] = None
     latest_trade: Optional[Dict[str, Any]] = None
+    latest_mark_price: Optional[Dict[str, Any]] = None
+    latest_funding_rate: Optional[Dict[str, Any]] = None
 
     last_event_type: Optional[str] = None
     last_exchange_timestamp: Optional[int] = None
@@ -144,6 +146,12 @@ class MarketDataStateManager:
             elif event_type == "trades":
                 state.latest_trade = dict(payload)
 
+            elif event_type == "mark_price":
+                state.latest_mark_price = dict(payload)
+
+            elif event_type == "funding_rate":
+                state.latest_funding_rate = dict(payload)
+
             state.last_event_type = event_type
             state.last_exchange_timestamp = (
                 event.exchange_timestamp
@@ -190,6 +198,16 @@ class MarketDataStateManager:
                 latest_trade=(
                     dict(state.latest_trade)
                     if state.latest_trade is not None
+                    else None
+                ),
+                latest_mark_price=(
+                    dict(state.latest_mark_price)
+                    if state.latest_mark_price is not None
+                    else None
+                ),
+                latest_funding_rate=(
+                    dict(state.latest_funding_rate)
+                    if state.latest_funding_rate is not None
                     else None
                 ),
                 last_event_type=state.last_event_type,
