@@ -152,6 +152,13 @@ class LiveExecutionEngine:
             elif mark <= position["take_profit"]:
                 self.close_position(symbol, type("F", (), {"bid": bid, "ask": ask})(), "TAKE_PROFIT")
 
+    def close_all(self, reason: str, features) -> None:
+        for symbol in list(self.positions):
+            try:
+                self.close_position(symbol, features, reason)
+            except Exception:
+                self.logger.exception("LIVE emergency close failed | symbol=%s", symbol)
+
     def get_stats(self):
         return {"live": True, "positions": {k: dict(v) for k, v in self.positions.items()}, "orders": len(self.orders)}
 
