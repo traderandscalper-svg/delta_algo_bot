@@ -96,12 +96,95 @@ class LiveExecutionEngine:
 
         contracts = min(contracts_from_risk, max_contracts)
 
-        # A one-contract position is allowed when it remains inside the
-        # configured notional cap; otherwise there is no valid order.
-        if contracts <= 0 and max_contracts >= 1:
-            contracts = 1
-
+        # Never force a minimum one-contract order. If one Delta contract
+        # would exceed the risk-engine quantity, the trade must be rejected.
         return max(contracts, 0)
+
+    def reconcile_exchange_state(self) -> dict[str, Any]:
+        """Reconcile local execution state with Delta before new signals."""
+        positions_response = self.rest.get_positions()
+        orders_response = self.rest.get_open_orders()
+
+        if not isinstance(positions_response, dict):
+            raise RuntimeError("Invalid Delta positions response during reconciliation.")
+        if not isinstance(orders_response, dict):
+            raise RuntimeError("Invalid Delta open-orders response during reconciliation.")
+        if positions_response.get("success") is False:
+            raise RuntimeError(f"Delta position reconciliation failed: {positions_response}")
+        if orders_response.get("success") is False:
+            raise RuntimeError(f"Delta open-order reconciliation failed: {orders_response}")
+
+        raw_positions = positions_response.get("result", [])
+        if isinstance(raw_positions, dict):
+            raw_positions = [raw_positions]
+        if not isinstance(raw_positions, list):
+            raise RuntimeError("Unexpected Delta positions result format.")
+
+        product_by_id = {}
+        for product in getattr(self.instruments, "products", []):
+            try:
+                product_by_id[int(product.get("id"))] = product
+            except (TypeError, ValueError):
+                continue
+
+        exchange_positions: dict[str, dict[str, Any]] = {}
+        for raw in raw_positions:
+            if not isinstance(raw, dict):
+                continue
+            size = int(float(raw.get("size") or 0))
+            if size == 0:
+                continue
+            product_id = raw.get("product_id")
+            product = product_by_id.get(int(product_id)) if product_id is not None else None
+            symbol = str(raw.get("product_symbol") or (product or {}).get("symbol") or "").upper()
+            if not symbol:
+                raise RuntimeError(f"Delta returned an open position without a symbol: {raw}")
+            if product is None:
+                product = self.instruments.get(symbol)
+            if not product:
+                raise RuntimeError(f"Open Delta position has unknown product: {symbol}")
+
+            side = "BUY" if size > 0 else "SELL"
+            contracts = abs(size)
+            entry_price = float(raw.get("entry_price") or 0.0)
+            previous = self.positions.get(symbol)
+            managed = bool(previous and previous.get("managed_by_bot"))
+            self.orders = self.orders if isinstance(self.orders, dict) else {}
+            exchange_positions[symbol] = {
+                **(previous if previous else {}),
+                "symbol": symbol,
+                "side": side,
+                "quantity": contracts,
+                "base_quantity": contracts * self._contract_value(symbol),
+                "contract_value": self._contract_value(symbol),
+                "entry_price": entry_price,
+                "entry_notional": self._notional(symbol, contracts, entry_price) if entry_price > 0 else 0.0,
+                "managed_by_bot": managed,
+                "reconciled": True,
+            }
+
+        stale_local = set(self.positions) - set(exchange_positions)
+        for symbol in stale_local:
+            self.logger.warning("POSITION RECONCILIATION | local position absent on Delta; removing local state | symbol=%s", symbol)
+
+        self.positions = exchange_positions
+
+        raw_orders = orders_response.get("result", [])
+        if isinstance(raw_orders, list):
+            self.orders = {str(o.get("id", o.get("client_order_id", i))): o for i, o in enumerate(raw_orders) if isinstance(o, dict)}
+        else:
+            self.orders = {}
+
+        summary = {
+            "exchange_positions": len(self.positions),
+            "open_orders": len(self.orders),
+            "symbols": sorted(self.positions),
+        }
+        self.logger.warning(
+            "POSITION RECONCILIATION COMPLETE | positions=%d | open_orders=%d | symbols=%s",
+            summary["exchange_positions"], summary["open_orders"], ",".join(summary["symbols"]) or "NONE",
+        )
+        return summary
 
     def _place_market(self, symbol: str, side: str, size: float, reduce_only: bool = False, stop_loss: float = 0.0, take_profit: float = 0.0, trail_amount: float = 0.0):
         if size <= 0:
@@ -139,6 +222,8 @@ class LiveExecutionEngine:
 
         existing = self.positions.get(symbol)
         if existing:
+            if existing.get("reconciled") and not existing.get("managed_by_bot"):
+                return False, "EXCHANGE_POSITION_RECONCILED_MANUAL_INTERVENTION_REQUIRED"
             if existing["side"] == side:
                 return False, "POSITION_ALREADY_OPEN"
             self.close_position(symbol, features, "OPPOSITE_SIGNAL")
@@ -203,6 +288,8 @@ class LiveExecutionEngine:
             "entry_fee_total": float(actual_entry_fee + actual_entry_gst),
             "learning_id": getattr(signal, "learning_id", ""),
             "strategy_names": list(signal.votes or ["AGGREGATED"]),
+            "managed_by_bot": True,
+            "reconciled": False,
         }
         self.total_trading_fees += actual_entry_fee
         self.total_fee_gst += actual_entry_gst
@@ -277,6 +364,10 @@ class LiveExecutionEngine:
     def process_market_price(self, symbol: str, bid: float, ask: float):
         position = self.positions.get(symbol)
         if not position:
+            return
+        if position.get("reconciled") and not position.get("managed_by_bot"):
+            return
+        if float(position.get("stop_loss") or 0.0) <= 0 or float(position.get("take_profit") or 0.0) <= 0:
             return
         mark = float(bid if position["side"] == "BUY" else ask)
         if position["side"] == "BUY":
