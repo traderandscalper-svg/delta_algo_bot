@@ -5034,7 +5034,7 @@ class TradingEngine:
             self.logger.info(
                 "Execution mode | "
                 "MODE=%s | "
-                "PAPER=%s | "
+                "PAPER_ENGINE=%s | "
                 "EXCHANGE_ORDERS=%s",
                 self.settings.trading_mode.value,
                 self.settings.trading_mode.value == "PAPER",
