@@ -94,6 +94,8 @@ class MarketDataValidator:
 
     MARKET_EVENT_TYPES = {
         "ticker",
+        "mark_price",
+        "funding_rate",
         "ob_l1",
         "ob_l2",
         "ob_updates",
@@ -386,6 +388,12 @@ class MarketDataValidator:
             return self._validate_ticker_data(
                 message
             )
+
+        if event_type == "mark_price":
+            return self._validate_simple_price_event(message, "mark_price")
+
+        if event_type == "funding_rate":
+            return self._validate_funding_event(message)
 
         if event_type in self.CONTROL_EVENT_TYPES:
 
@@ -691,6 +699,20 @@ class MarketDataValidator:
             "or mark price"
         )
 
+    def _validate_simple_price_event(self, message: dict[str, Any], field: str) -> Optional[str]:
+        payload = self._get_delta_payload(message)
+        value = payload.get("p") or payload.get(field) or payload.get("price")
+        if value is None or not self._is_number(value) or float(value) <= 0:
+            return f"Invalid {field} price"
+        return None
+
+    def _validate_funding_event(self, message: dict[str, Any]) -> Optional[str]:
+        payload = self._get_delta_payload(message)
+        value = payload.get("fr") or payload.get("funding_rate")
+        if value is None or not self._is_number(value):
+            return "Invalid funding rate"
+        return None
+
     # =============================================================
     # EVENT NORMALIZATION
     # =============================================================
@@ -707,6 +729,12 @@ class MarketDataValidator:
                 message
             )
 
+        if event_type == "mark_price":
+            return self._normalize_mark_price(message)
+
+        if event_type == "funding_rate":
+            return self._normalize_funding_rate(message)
+
         if event_type == "ob_l1":
 
             return self._normalize_orderbook_l1(
@@ -720,6 +748,26 @@ class MarketDataValidator:
             )
 
         return {}
+
+    def _normalize_mark_price(self, message: dict[str, Any]) -> dict[str, Any]:
+        payload = self._get_delta_payload(message)
+        return {
+            "event_type": "mark_price",
+            "symbol": payload.get("sy") or message.get("sy") or message.get("symbol"),
+            "mark_price": self._safe_float(payload.get("p") or payload.get("mark_price") or payload.get("price")),
+            "exchange_timestamp": self._extract_exchange_timestamp(message),
+        }
+
+    def _normalize_funding_rate(self, message: dict[str, Any]) -> dict[str, Any]:
+        payload = self._get_delta_payload(message)
+        return {
+            "event_type": "funding_rate",
+            "symbol": payload.get("sy") or message.get("sy") or message.get("symbol"),
+            "funding_rate": self._safe_float(payload.get("fr") or payload.get("funding_rate")),
+            "funding_interval": self._safe_float(payload.get("fi")),
+            "next_funding_realization": payload.get("nfr"),
+            "exchange_timestamp": self._extract_exchange_timestamp(message),
+        }
 
     # =============================================================
     # TICKER NORMALIZATION
