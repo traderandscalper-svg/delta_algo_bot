@@ -4811,11 +4811,22 @@ class TradingEngine:
         self.rejection_counts = {}
 
         # ----------------------------------------------------
-        # HARD SAFETY:
-        # LIVE ORDERS ARE NOT ENABLED.
+        # Explicit exchange-order safety switch.
+        # DEMO orders are permitted only when ENABLE_DEMO_TRADING=true.
+        # LIVE orders are permitted only when ENABLE_LIVE_TRADING=true.
         # ----------------------------------------------------
 
-        self.order_execution_enabled = (self.settings.trading_mode.value == "LIVE" and self.settings.enable_live_trading)
+        self.order_execution_enabled = (
+            (
+                self.settings.trading_mode.value == "DEMO"
+                and self.settings.enable_demo_trading
+            )
+            or
+            (
+                self.settings.trading_mode.value == "LIVE"
+                and self.settings.enable_live_trading
+            )
+        )
 
         self.engine_cycle_count = 0
 
@@ -4943,13 +4954,18 @@ class TradingEngine:
             self.delta.load_instruments()
 
             if self.order_execution_enabled:
+                execution_mode = self.settings.trading_mode.value
                 self.live_execution = LiveExecutionEngine(
                     rest_client=self.delta.rest,
                     instrument_manager=self.delta.instruments,
                     risk_engine=self.risk_engine,
                     result_handler=self._record_trade_result,
+                    execution_mode=execution_mode,
                 )
-                self.logger.warning("LIVE TRADING ENABLED | real Delta orders are permitted.")
+                self.logger.warning(
+                    "%s EXCHANGE ORDER EXECUTION ENABLED | real Delta orders are permitted.",
+                    execution_mode,
+                )
 
             self.candle_aggregator = (
                 CandleAggregator(
@@ -4993,10 +5009,11 @@ class TradingEngine:
 
             self.logger.info(
                 "Execution mode | "
-                "PAPER=true | "
-                "LIVE=%s | "
-                "ORDER_EXECUTION_ENABLED=%s",
-                self.order_execution_enabled,
+                "MODE=%s | "
+                "PAPER=%s | "
+                "EXCHANGE_ORDERS=%s",
+                self.settings.trading_mode.value,
+                self.settings.trading_mode.value == "PAPER",
                 self.order_execution_enabled,
             )
 
@@ -6028,7 +6045,7 @@ class TradingEngine:
                 self.initialized
             ),
 
-            "execution_mode": "PAPER",
+            "execution_mode": self.settings.trading_mode.value,
 
             "live_order_execution": (
                 self.order_execution_enabled
