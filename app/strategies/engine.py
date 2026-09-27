@@ -22,6 +22,10 @@ from app.strategies.signals import (
 from app.strategies.trend import TrendStrategy
 
 
+def clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
 class StrategyEngine:
     """
     Central strategy engine.
@@ -78,6 +82,14 @@ class StrategyEngine:
             MeanReversionStrategy(),
             BreakoutStrategy(),
         ]
+
+        # Adaptive weights are applied at aggregation time.
+        # They are updated by the Phase 12 orchestration layer
+        # after enough completed trade outcomes exist.
+        self.strategy_weights = {
+            strategy.name: 1.0
+            for strategy in self.strategies
+        }
 
         # -------------------------------------------------
         # Phase 7.4 diagnostics
@@ -246,6 +258,17 @@ class StrategyEngine:
             # A strategy with zero quality should still
             # retain a minimum weighting instead of being
             # completely discarded.
+            strategy_weight = clamp(
+                float(
+                    self.strategy_weights.get(
+                        signal.strategy_name,
+                        1.0,
+                    )
+                ),
+                0.50,
+                1.50,
+            )
+
             effective_weight = (
                 signal.confidence
                 * max(
@@ -254,6 +277,7 @@ class StrategyEngine:
                     if signal.quality > 0
                     else 1.0,
                 )
+                * strategy_weight
             )
 
             if signal.action == SignalAction.BUY:
