@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
-from app.ml.model import MLModel
+from app.ml.model import MLModel\nfrom app.config.settings import Settings
 
 
 logger = logging.getLogger("MLTrainer")
@@ -172,8 +172,8 @@ class MLTrainer:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train the Delta ML prediction model.")
-    parser.add_argument("--dataset", default="data/ml/final_training_dataset.csv")
-    parser.add_argument("--model", default="data/models/market_direction_model.joblib")
+    parser.add_argument("--dataset", default=str(data_root / "ml" / "final_training_dataset.csv"))
+    parser.add_argument("--model", default=str(data_root / "models" / "market_direction_model.joblib"))
     parser.add_argument("--test-fraction", type=float, default=0.20)
     args = parser.parse_args()
 
