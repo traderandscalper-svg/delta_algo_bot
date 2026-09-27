@@ -2531,22 +2531,31 @@ class StrategyValidator:
             drawdown,
         )
 
-        # A single executed trade must be counted once, not once per
-        # contributing strategy vote. Attribute it to the aggregated
-        # decision and keep per-strategy signal statistics separate.
-        name = "PHASE9_AGGREGATED"
-        stats = self._get_stats(name)
-        stats["trades"] += 1
-        stats["net_pnl"] += pnl
+        # Count the completed trade once globally, while also
+        # attributing its outcome to each strategy that contributed
+        # to the entry. This makes Phase 12 adaptive weighting
+        # meaningful without multiplying the global trade count.
+        names = [
+            str(name).upper()
+            for name in (strategy_names or [])
+            if str(name).strip()
+        ]
+        if not names:
+            names = ["PHASE9_AGGREGATED"]
 
-        if pnl > 0:
-            stats["wins"] += 1
-            stats["gross_profit"] += pnl
-        elif pnl < 0:
-            stats["losses"] += 1
-            stats["gross_loss"] += abs(pnl)
-        else:
-            stats["breakeven"] += 1
+        for name in dict.fromkeys(names):
+            stats = self._get_stats(name)
+            stats["trades"] += 1
+            stats["net_pnl"] += pnl
+
+            if pnl > 0:
+                stats["wins"] += 1
+                stats["gross_profit"] += pnl
+            elif pnl < 0:
+                stats["losses"] += 1
+                stats["gross_loss"] += abs(pnl)
+            else:
+                stats["breakeven"] += 1
 
     # --------------------------------------------------------
 
@@ -4818,6 +4827,18 @@ class TradingEngine:
             self.kill_switch_reason = (
                 "DAILY_LOSS_LIMIT"
             )
+
+        # No fresh market data means new entries are unsafe.
+        # Existing paper positions are still managed by the
+        # candle/book callbacks when data resumes.
+        if self.last_event_time > 0:
+            stale_for = time.time() - self.last_event_time
+            if stale_for > self.settings.stale_data_timeout_seconds:
+                self.kill_switch = True
+                self.kill_switch_reason = "MARKET_DATA_STALE"
+        elif self.engine_cycle_count > self.settings.stale_data_timeout_seconds:
+            self.kill_switch = True
+            self.kill_switch_reason = "MARKET_DATA_NOT_RECEIVED"
 
         # ----------------------------------------------------
         # Strategy adaptation.
