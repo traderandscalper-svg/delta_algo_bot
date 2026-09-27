@@ -218,6 +218,7 @@ class PaperPosition:
 
     entry_price: float
     entry_timestamp: float
+    entry_wall_time: float = 0.0
 
     stop_loss: float
     take_profit: float
@@ -3569,6 +3570,7 @@ class PaperExecutionEngine:
             quantity=quantity,
             entry_price=entry_price,
             entry_timestamp=signal.timestamp,
+            entry_wall_time=time.time(),
             stop_loss=stop,
             take_profit=target,
             trailing_stop=0.0,
@@ -3662,7 +3664,11 @@ class PaperExecutionEngine:
 
         holding_time = max(
             time.time()
-            - position.entry_timestamp,
+            - (
+                position.entry_wall_time
+                if position.entry_wall_time > 0
+                else time.time()
+            ),
             0.0,
         )
 
@@ -3912,7 +3918,11 @@ class PaperExecutionEngine:
                     ),
                     "holding_seconds": max(
                         time.time()
-                        - position.entry_timestamp,
+                        - (
+                            position.entry_wall_time
+                            if position.entry_wall_time > 0
+                            else time.time()
+                        ),
                         0.0,
                     ),
                 }
