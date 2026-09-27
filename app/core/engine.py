@@ -3953,12 +3953,16 @@ class PaperExecutionEngine:
 
 
 class LearningEngine:
-    """Lightweight online ML learner for completed paper trades.
+    """Integrated online + offline ML learning layer.
 
-    The learner is deliberately dependency-free. It records the feature vector
-    used for an entry, waits for the trade outcome, then performs one online
-    logistic-regression update. It does not generate an entry by itself; it
-    adjusts confidence only after enough labeled outcomes exist.
+    Responsibilities:
+    - Store live signal samples and pending trade labels.
+    - Perform lightweight online logistic updates after completed paper trades.
+    - Optionally load the historical RandomForest model used by the backtest.
+    - Keep online and offline models separate so one cannot silently overwrite
+      the other.
+    - Expose defensive status information so monitoring/shutdown can never fail
+      because an optional ML artifact is missing.
     """
 
     FEATURE_NAMES = (
@@ -3969,11 +3973,23 @@ class LearningEngine:
         "signal_direction",
     )
 
-    def __init__(self, max_samples=10000, model_path="data/learning/phase9_online_model.json"):
+    DEFAULT_ONLINE_MODEL_PATH = "data/learning/phase9_online_model.json"
+    DEFAULT_OFFLINE_MODEL_PATH = "data/models/market_direction_model.joblib"
+
+    def __init__(
+        self,
+        max_samples=10000,
+        model_path=DEFAULT_ONLINE_MODEL_PATH,
+        offline_model_path=DEFAULT_OFFLINE_MODEL_PATH,
+    ):
         self.logger = logging.getLogger("LearningEngine")
+
         self.samples = deque(maxlen=max_samples)
         self.pending = {}
+
         self.enabled = True
+
+        # Online model state.
         self.model_loaded = False
         self.model_name = "NONE"
         self.predictions = 0
@@ -3981,11 +3997,24 @@ class LearningEngine:
         self.labeled_outcomes = 0
         self.learning_rate = 0.08
         self.weights = [0.0] * (len(self.FEATURE_NAMES) + 1)
-        self.model_path = model_path
+
+        self.model_path = str(model_path)
+
+        # Historical/offline supervised model used as an optional
+        # confirmation layer by TradingEngine.
+        self.offline_model_path = str(offline_model_path)
+        self.offline_model = None
+        self.offline_model_load_error = ""
+
         self._load_model()
+        self._load_offline_model()
 
     def _vector(self, features, signal):
-        direction = 1.0 if signal.action == SignalAction.BUY else -1.0 if signal.action == SignalAction.SELL else 0.0
+        direction = (
+            1.0 if signal.action == SignalAction.BUY
+            else -1.0 if signal.action == SignalAction.SELL
+            else 0.0
+        )
         return [
             clamp(safe_float(features.return_1) * 100.0, -5.0, 5.0),
             clamp(safe_float(features.return_5) * 100.0, -10.0, 10.0),
@@ -4019,11 +4048,19 @@ class LearningEngine:
     def record(self, features, signal):
         if not self.enabled:
             return ""
+
         sample_id = hashlib.sha1(
-            f"{features.symbol}|{features.timestamp}|{signal.action.value}|{signal.confidence:.8f}".encode()
+            f"{features.symbol}|{features.timestamp}|{signal.action.value}|"
+            f"{signal.confidence:.8f}".encode()
         ).hexdigest()[:20]
+
         vector = self._vector(features, signal)
-        probability = self._predict_probability(vector) if self.model_loaded else 0.5
+        probability = (
+            self._predict_probability(vector)
+            if self.model_loaded
+            else 0.5
+        )
+
         sample = {
             "id": sample_id,
             "timestamp": features.timestamp,
@@ -4037,100 +4074,327 @@ class LearningEngine:
             "outcome": None,
             "pnl": None,
         }
+
         self.samples.append(sample)
+
         if signal.action != SignalAction.HOLD:
             self.pending[sample_id] = sample
+
         return sample_id
 
     def record_outcome(self, learning_id, pnl):
         if not learning_id:
             return
+
         sample = self.pending.pop(learning_id, None)
         if sample is None:
             return
+
         pnl = safe_float(pnl)
         label = 1.0 if pnl > 0 else 0.0
-        probability = safe_float(sample.get("predicted_probability"), 0.5)
+        probability = safe_float(
+            sample.get("predicted_probability"),
+            0.5,
+        )
+
         self.labeled_outcomes += 1
+
         if (probability >= 0.5) == bool(label):
             self.correct_predictions += 1
+
         self.predictions += 1
+
         error = label - probability
         vector = sample["vector"]
+
         self.weights[0] += self.learning_rate * error
+
         for i, x in enumerate(vector, start=1):
-            self.weights[i] += self.learning_rate * error * x
-        sample["outcome"] = "WIN" if label else "LOSS"
+            self.weights[i] += (
+                self.learning_rate * error * x
+            )
+
+        sample["outcome"] = (
+            "WIN" if label else "LOSS"
+        )
         sample["pnl"] = pnl
-        self.model_loaded = self.labeled_outcomes >= 5
-        self.model_name = "ONLINE_LOGISTIC_V1" if self.model_loaded else "WARMING_UP"
+
+        self.model_loaded = (
+            self.labeled_outcomes >= 5
+        )
+        self.model_name = (
+            "ONLINE_LOGISTIC_V1"
+            if self.model_loaded
+            else "WARMING_UP"
+        )
+
         self._save_model()
+
         self.logger.info(
-            "ML LEARNING UPDATE | id=%s | outcome=%s | pnl=%+.8f | labeled=%d | model=%s",
-            learning_id, sample["outcome"], pnl, self.labeled_outcomes, self.model_name,
+            "ML LEARNING UPDATE | id=%s | outcome=%s | "
+            "pnl=%+.8f | labeled=%d | model=%s",
+            learning_id,
+            sample["outcome"],
+            pnl,
+            self.labeled_outcomes,
+            self.model_name,
         )
 
     def predict_confidence(self, features, signal):
         confidence = signal.confidence
-        if self.model_loaded and signal.action != SignalAction.HOLD:
-            probability = self._predict_probability(self._vector(features, signal))
-            confidence = clamp(confidence * 0.75 + probability * 0.25, 0.0, 1.0)
+
+        if (
+            self.model_loaded
+            and signal.action != SignalAction.HOLD
+        ):
+            probability = self._predict_probability(
+                self._vector(features, signal)
+            )
+
+            confidence = clamp(
+                confidence * 0.75
+                + probability * 0.25,
+                0.0,
+                1.0,
+            )
+
             self.logger.debug(
                 "Online ML prediction | action=%s | probability=%.4f",
                 signal.action.value,
                 probability,
             )
+
         else:
             if features.signal_quality > 0.75:
                 confidence += 0.04
+
             if abs(features.multi_timeframe_score) > 0.40:
                 confidence += 0.03
+
             if features.data_quality != "GOOD":
                 confidence -= 0.10
-        return clamp(confidence, 0.0, 1.0)
+
+        return clamp(
+            confidence,
+            0.0,
+            1.0,
+        )
 
     def _save_model(self):
         try:
-            directory = os.path.dirname(self.model_path)
+            directory = os.path.dirname(
+                self.model_path
+            )
+
             if directory:
-                os.makedirs(directory, exist_ok=True)
-            tmp = self.model_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"model": self.model_name, "labeled_outcomes": self.labeled_outcomes,
-                           "weights": self.weights, "learning_rate": self.learning_rate}, f)
-            os.replace(tmp, self.model_path)
+                os.makedirs(
+                    directory,
+                    exist_ok=True,
+                )
+
+            tmp = (
+                self.model_path
+                + ".tmp"
+            )
+
+            with open(
+                tmp,
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(
+                    {
+                        "model": self.model_name,
+                        "labeled_outcomes": self.labeled_outcomes,
+                        "weights": self.weights,
+                        "learning_rate": self.learning_rate,
+                        "feature_names": list(self.FEATURE_NAMES),
+                        "version": 2,
+                    },
+                    f,
+                )
+
+            os.replace(
+                tmp,
+                self.model_path,
+            )
+
         except Exception:
-            self.logger.exception("Unable to save ML model.")
+            self.logger.exception(
+                "Unable to save ML model."
+            )
 
     def _load_model(self):
         try:
-            if not os.path.exists(self.model_path):
+            if not os.path.exists(
+                self.model_path
+            ):
                 return
-            with open(self.model_path, "r", encoding="utf-8") as f:
+
+            with open(
+                self.model_path,
+                "r",
+                encoding="utf-8",
+            ) as f:
                 data = json.load(f)
-            weights = data.get("weights")
-            if isinstance(weights, list) and len(weights) == len(self.weights):
-                self.weights = [safe_float(x) for x in weights]
-                self.labeled_outcomes = int(safe_float(data.get("labeled_outcomes"), 0))
-                self.model_loaded = self.labeled_outcomes >= 5
-                self.model_name = "ONLINE_LOGISTIC_V1" if self.model_loaded else "WARMING_UP"
-                self.logger.info("ML model loaded | model=%s | labeled=%d", self.model_name, self.labeled_outcomes)
+
+            weights = data.get(
+                "weights"
+            )
+
+            if (
+                isinstance(weights, list)
+                and len(weights)
+                == len(self.weights)
+            ):
+                self.weights = [
+                    safe_float(x)
+                    for x in weights
+                ]
+
+                self.labeled_outcomes = int(
+                    safe_float(
+                        data.get(
+                            "labeled_outcomes"
+                        ),
+                        0,
+                    )
+                )
+
+                self.learning_rate = clamp(
+                    safe_float(
+                        data.get(
+                            "learning_rate"
+                        ),
+                        self.learning_rate,
+                    ),
+                    0.0001,
+                    1.0,
+                )
+
+                self.model_loaded = (
+                    self.labeled_outcomes >= 5
+                )
+
+                self.model_name = (
+                    "ONLINE_LOGISTIC_V1"
+                    if self.model_loaded
+                    else "WARMING_UP"
+                )
+
+                self.logger.info(
+                    "Online ML model loaded | "
+                    "model=%s | labeled=%d",
+                    self.model_name,
+                    self.labeled_outcomes,
+                )
+
         except Exception:
-            self.logger.exception("Unable to load ML model; starting fresh.")
+            self.logger.exception(
+                "Unable to load ML model; "
+                "starting fresh."
+            )
+
+    def _load_offline_model(self):
+        """Load the historical RandomForest model if it exists.
+
+        Missing offline models are normal during early development. They must
+        not prevent the live/paper engine from starting or shutting down.
+        """
+
+        self.offline_model = None
+        self.offline_model_load_error = ""
+
+        path = os.path.expanduser(
+            self.offline_model_path
+        )
+
+        if not os.path.exists(path):
+            self.logger.info(
+                "Offline ML model not present | path=%s",
+                self.offline_model_path,
+            )
+            return
+
+        try:
+            from app.ml.model import MLModel
+
+            self.offline_model = MLModel.load(
+                path
+            )
+
+            self.logger.info(
+                "Offline ML model loaded | path=%s | "
+                "features=%d",
+                self.offline_model_path,
+                len(
+                    getattr(
+                        self.offline_model,
+                        "feature_names",
+                        [],
+                    )
+                ),
+            )
+
+        except Exception as exc:
+            self.offline_model = None
+            self.offline_model_load_error = (
+                f"{type(exc).__name__}: {exc}"
+            )
+
+            self.logger.warning(
+                "Offline ML model unavailable | path=%s | "
+                "reason=%s",
+                self.offline_model_path,
+                self.offline_model_load_error,
+            )
+
+    def reload_offline_model(self):
+        """Reload the historical model after a new backtest/training run."""
+
+        self._load_offline_model()
+        return self.offline_model is not None
+
+    def offline_model_available(self):
+        return self.offline_model is not None
 
     def get_stats(self):
+        """Return a shutdown-safe ML status snapshot.
+
+        This method intentionally contains no direct attribute access to
+        optional objects that may not have been initialized.
+        """
+
         return {
-            "enabled": self.enabled,
-            "model_loaded": self.model_loaded,
-            "model_name": self.model_name,
+            "enabled": bool(self.enabled),
+            "model_loaded": bool(self.model_loaded),
+            "model_name": str(self.model_name),
             "samples": len(self.samples),
             "pending": len(self.pending),
-            "predictions": self.predictions,
-            "correct_predictions": self.correct_predictions,
-            "labeled_outcomes": self.labeled_outcomes,
+            "predictions": int(self.predictions),
+            "correct_predictions": int(
+                self.correct_predictions
+            ),
+            "prediction_accuracy": (
+                self.correct_predictions
+                / self.predictions
+                if self.predictions
+                else 0.0
+            ),
+            "labeled_outcomes": int(
+                self.labeled_outcomes
+            ),
             "model_path": self.model_path,
             "offline_model_path": self.offline_model_path,
-            "offline_model_loaded": self.offline_model is not None,
+            "offline_model_loaded": (
+                self.offline_model is not None
+            ),
+            "offline_model_error": (
+                self.offline_model_load_error
+            ),
+            "feature_count": len(
+                self.FEATURE_NAMES
+            ),
         }
 
 
