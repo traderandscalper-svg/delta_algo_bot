@@ -20,6 +20,7 @@ from app.strategies.engine import StrategyEngine as Phase9StrategyEngine
 from app.ml.predict import MLPredictor
 from app.strategies.signal_performance_tracker import SignalPerformanceTracker
 from app.core.persistence import EnginePersistence
+from app.execution.live import LiveExecutionEngine
 
 
 # ============================================================
@@ -4814,7 +4815,7 @@ class TradingEngine:
         # LIVE ORDERS ARE NOT ENABLED.
         # ----------------------------------------------------
 
-        self.order_execution_enabled = False
+        self.order_execution_enabled = (self.settings.trading_mode.value == "LIVE" and self.settings.enable_live_trading)
 
         self.engine_cycle_count = 0
 
@@ -4931,6 +4932,16 @@ class TradingEngine:
 
             if self.recovery_state.get("paper_execution"):
                 self.paper_execution.restore_state(self.recovery_state["paper_execution"])
+            self.live_execution = None
+            if self.order_execution_enabled:
+                self.live_execution = LiveExecutionEngine(
+                    rest_client=self.delta.rest,
+                    instrument_manager=self.delta.instruments,
+                    risk_engine=self.risk_engine,
+                    result_handler=self._record_trade_result,
+                )
+                self.logger.warning("LIVE TRADING ENABLED | real Delta orders are permitted.")
+
 
             restored_weights = self.recovery_state.get("strategy_weights")
             if isinstance(restored_weights, dict):
@@ -4983,8 +4994,9 @@ class TradingEngine:
             self.logger.info(
                 "Execution mode | "
                 "PAPER=true | "
-                "LIVE=false | "
+                "LIVE=%s | "
                 "ORDER_EXECUTION_ENABLED=%s",
+                self.order_execution_enabled,
                 self.order_execution_enabled,
             )
 
@@ -5372,11 +5384,10 @@ class TradingEngine:
                 )
 
                 if self.paper_execution:
-
-                    self.paper_execution.update_book(
-                        bid,
-                        ask,
-                    )
+                    self.paper_execution.update_book(bid, ask)
+                if self.live_execution:
+                    symbol = str(payload.get("sy") or payload.get("symbol") or "")
+                    self.live_execution.process_market_price(symbol, bid, ask)
 
             if self.candle_aggregator:
 
@@ -5637,10 +5648,15 @@ class TradingEngine:
                 signal,
             )
 
-            if self.paper_execution is None:
+            if self.paper_execution is None and self.live_execution is None:
                 return
 
             if self.kill_switch:
+                if self.live_execution:
+                    try:
+                        self.live_execution.close_all("KILL_SWITCH", features)
+                    except Exception:
+                        self.logger.exception("Failed to close LIVE positions on kill switch.")
 
                 self._record_rejection(
                     self.kill_switch_reason
@@ -5659,13 +5675,8 @@ class TradingEngine:
                 features.timestamp
             )
 
-            accepted, reason = (
-                self.paper_execution
-                .process_signal(
-                    signal,
-                    features,
-                )
-            )
+            execution = self.live_execution if self.live_execution is not None else self.paper_execution
+            accepted, reason = execution.process_signal(signal, features)
 
             if not accepted:
 
@@ -5680,7 +5691,8 @@ class TradingEngine:
                 )
 
                 self.logger.info(
-                    "PAPER SIGNAL ACCEPTED | "
+                    "%s SIGNAL ACCEPTED | ",
+                    "LIVE" if self.live_execution else "PAPER",
                     "symbol=%s | "
                     "action=%s | "
                     "confidence=%.4f | "
@@ -5839,6 +5851,7 @@ class TradingEngine:
                 "engine_state": self.state.value,
                 "strategy_weights": dict(self.strategy_engine.strategy_weights),
                 "paper_execution": self.paper_execution.snapshot_state() if self.paper_execution else {},
+                "live_execution": self.live_execution.snapshot_state() if self.live_execution else {},
                 "risk": self.risk_engine.get_stats() if self.risk_engine else {},
             })
         except Exception:
