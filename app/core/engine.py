@@ -10,6 +10,7 @@ from typing import Any
 import json
 import os
 import hashlib
+import joblib
 
 from app.config.settings import Settings
 from app.exchange.client import DeltaClient
@@ -3968,7 +3969,7 @@ class LearningEngine:
         "signal_direction",
     )
 
-    def __init__(self, max_samples=10000, model_path="data/learning/phase9_online_model.json"):
+    def __init__(self, max_samples=10000, model_path="data/learning/phase9_online_model.json", offline_model_path="data/learning/backtest_model.joblib"):
         self.logger = logging.getLogger("LearningEngine")
         self.samples = deque(maxlen=max_samples)
         self.pending = {}
@@ -3981,7 +3982,44 @@ class LearningEngine:
         self.learning_rate = 0.08
         self.weights = [0.0] * (len(self.FEATURE_NAMES) + 1)
         self.model_path = model_path
+        self.offline_model_path = offline_model_path
+        self.offline_model = None
+        self.offline_model_features = []
         self._load_model()
+        self._load_offline_model()
+
+    def _load_offline_model(self):
+        try:
+            if not os.path.exists(self.offline_model_path):
+                return
+            payload = joblib.load(self.offline_model_path)
+            self.offline_model = payload.get("model")
+            self.offline_model_features = list(payload.get("features", []))
+            if self.offline_model is not None:
+                self.logger.info(
+                    "OFFLINE ML MODEL LOADED | path=%s | features=%d",
+                    self.offline_model_path,
+                    len(self.offline_model_features),
+                )
+        except Exception:
+            self.offline_model = None
+            self.offline_model_features = []
+            self.logger.exception("Unable to load offline ML model; online learner remains active.")
+
+    def _offline_probability(self, features):
+        if self.offline_model is None or not self.offline_model_features:
+            return None
+        values = []
+        for name in self.offline_model_features:
+            values.append(safe_float(getattr(features, name, 0.0)))
+        try:
+            probabilities = self.offline_model.predict_proba([values])[0]
+            classes = list(getattr(self.offline_model, "classes_", []))
+            if 1 in classes:
+                return float(probabilities[classes.index(1)])
+        except Exception:
+            self.logger.exception("Offline ML prediction failed.")
+        return None
 
     def _vector(self, features, signal):
         direction = 1.0 if signal.action == SignalAction.BUY else -1.0 if signal.action == SignalAction.SELL else 0.0
@@ -4071,14 +4109,27 @@ class LearningEngine:
 
     def predict_confidence(self, features, signal):
         confidence = signal.confidence
-        if self.model_loaded and signal.action != SignalAction.HOLD:
-            probability = self._predict_probability(self._vector(features, signal))
-            if probability >= 0.5:
-                confidence = clamp(confidence * 0.75 + probability * 0.25, 0.0, 1.0)
+        if signal.action != SignalAction.HOLD:
+            probabilities = []
+            if self.model_loaded:
+                probabilities.append(self._predict_probability(self._vector(features, signal)))
+            offline_probability = self._offline_probability(features)
+            if offline_probability is not None:
+                # Convert probability to direction-aware confidence.
+                if signal.action == SignalAction.SELL:
+                    offline_probability = 1.0 - offline_probability
+                probabilities.append(offline_probability)
+
+            if probabilities:
+                probability = sum(probabilities) / len(probabilities)
+                confidence = clamp(confidence * 0.70 + probability * 0.30, 0.0, 1.0)
+                self.logger.debug(
+                    "ML prediction | action=%s | probability=%.4f | sources=%d",
+                    signal.action.value,
+                    probability,
+                    len(probabilities),
+                )
             else:
-                confidence = clamp(confidence * 0.75 + probability * 0.25, 0.0, 1.0)
-            self.logger.debug("ML prediction | action=%s | probability=%.4f", signal.action.value, probability)
-        else:
             if features.signal_quality > 0.75:
                 confidence += 0.04
             if abs(features.multi_timeframe_score) > 0.40:
@@ -4127,6 +4178,8 @@ class LearningEngine:
             "correct_predictions": self.correct_predictions,
             "labeled_outcomes": self.labeled_outcomes,
             "model_path": self.model_path,
+            "offline_model_path": self.offline_model_path,
+            "offline_model_loaded": self.offline_model is not None,
         }
 
 
