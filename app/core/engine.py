@@ -10,7 +10,6 @@ from typing import Any
 import json
 import os
 import hashlib
-import joblib
 
 from app.config.settings import Settings
 from app.exchange.client import DeltaClient
@@ -18,6 +17,7 @@ from app.market_data.candle_aggregator import CandleAggregator
 from app.market_data.collector import MarketDataCollector
 from app.safety.watchdog import Watchdog
 from app.strategies.engine import StrategyEngine as Phase9StrategyEngine
+from app.ml.predict import MLPredictor
 
 
 # ============================================================
@@ -3969,7 +3969,7 @@ class LearningEngine:
         "signal_direction",
     )
 
-    def __init__(self, max_samples=10000, model_path="data/learning/phase9_online_model.json", offline_model_path="data/learning/backtest_model.joblib"):
+    def __init__(self, max_samples=10000, model_path="data/learning/phase9_online_model.json"):
         self.logger = logging.getLogger("LearningEngine")
         self.samples = deque(maxlen=max_samples)
         self.pending = {}
@@ -3982,44 +3982,7 @@ class LearningEngine:
         self.learning_rate = 0.08
         self.weights = [0.0] * (len(self.FEATURE_NAMES) + 1)
         self.model_path = model_path
-        self.offline_model_path = offline_model_path
-        self.offline_model = None
-        self.offline_model_features = []
         self._load_model()
-        self._load_offline_model()
-
-    def _load_offline_model(self):
-        try:
-            if not os.path.exists(self.offline_model_path):
-                return
-            payload = joblib.load(self.offline_model_path)
-            self.offline_model = payload.get("model")
-            self.offline_model_features = list(payload.get("features", []))
-            if self.offline_model is not None:
-                self.logger.info(
-                    "OFFLINE ML MODEL LOADED | path=%s | features=%d",
-                    self.offline_model_path,
-                    len(self.offline_model_features),
-                )
-        except Exception:
-            self.offline_model = None
-            self.offline_model_features = []
-            self.logger.exception("Unable to load offline ML model; online learner remains active.")
-
-    def _offline_probability(self, features):
-        if self.offline_model is None or not self.offline_model_features:
-            return None
-        values = []
-        for name in self.offline_model_features:
-            values.append(safe_float(getattr(features, name, 0.0)))
-        try:
-            probabilities = self.offline_model.predict_proba([values])[0]
-            classes = list(getattr(self.offline_model, "classes_", []))
-            if 1 in classes:
-                return float(probabilities[classes.index(1)])
-        except Exception:
-            self.logger.exception("Offline ML prediction failed.")
-        return None
 
     def _vector(self, features, signal):
         direction = 1.0 if signal.action == SignalAction.BUY else -1.0 if signal.action == SignalAction.SELL else 0.0
@@ -4109,27 +4072,15 @@ class LearningEngine:
 
     def predict_confidence(self, features, signal):
         confidence = signal.confidence
-        if signal.action != SignalAction.HOLD:
-            probabilities = []
-            if self.model_loaded:
-                probabilities.append(self._predict_probability(self._vector(features, signal)))
-            offline_probability = self._offline_probability(features)
-            if offline_probability is not None:
-                # Convert probability to direction-aware confidence.
-                if signal.action == SignalAction.SELL:
-                    offline_probability = 1.0 - offline_probability
-                probabilities.append(offline_probability)
-
-            if probabilities:
-                probability = sum(probabilities) / len(probabilities)
-                confidence = clamp(confidence * 0.70 + probability * 0.30, 0.0, 1.0)
-                self.logger.debug(
-                    "ML prediction | action=%s | probability=%.4f | sources=%d",
-                    signal.action.value,
-                    probability,
-                    len(probabilities),
-                )
-            else:
+        if self.model_loaded and signal.action != SignalAction.HOLD:
+            probability = self._predict_probability(self._vector(features, signal))
+            confidence = clamp(confidence * 0.75 + probability * 0.25, 0.0, 1.0)
+            self.logger.debug(
+                "Online ML prediction | action=%s | probability=%.4f",
+                signal.action.value,
+                probability,
+            )
+        else:
             if features.signal_quality > 0.75:
                 confidence += 0.04
             if abs(features.multi_timeframe_score) > 0.40:
@@ -4409,6 +4360,12 @@ class TradingEngine:
 
         self.learning_engine = (
             LearningEngine()
+        )
+
+        # Offline ML model trained from the historical pipeline is an
+        # additional confirmation layer. It never places orders itself.
+        self.ml_predictor = MLPredictor(
+            "data/models/market_direction_model.joblib"
         )
 
         self.portfolio = (
@@ -5148,6 +5105,82 @@ class TradingEngine:
                     signal,
                 )
             )
+
+            # ------------------------------------------------
+            # OFFLINE ML CONFIRMATION
+            # ------------------------------------------------
+            # The production model predicts the short-horizon market
+            # direction from the same live-compatible feature family
+            # used during historical training. It is confirmation only.
+            offline_ml = None
+            if (
+                signal.action != SignalAction.HOLD
+                and self.ml_predictor.is_available()
+            ):
+                ml_features = {
+                    "price": features.price,
+                    "mark_price": features.price,
+                    "bid": features.bid,
+                    "ask": features.ask,
+                    "bid_size": features.bid_size,
+                    "ask_size": features.ask_size,
+                    "spread": features.spread,
+                    "spread_bps": features.spread_bps,
+                    "orderbook_imbalance": features.orderbook_imbalance,
+                    "trade_imbalance": features.trade_flow,
+                    "trade_volume": features.buy_volume + features.sell_volume,
+                    "return_1": features.return_1,
+                    "return_5": features.return_5,
+                    "volatility_5": features.volatility,
+                    "momentum_5": features.momentum,
+                    "sma_5_distance": features.trend,
+                    "sma_10_distance": features.trend,
+                    "sma_20_distance": features.trend,
+                    "range_position": 0.5,
+                    "mark_basis": 0.0,
+                    "open_interest": 0.0,
+                    "open_interest_change": 0.0,
+                    "change_24h": 0.0,
+                }
+                try:
+                    offline_ml = self.ml_predictor.predict(ml_features)
+                    predicted = int(offline_ml["prediction"])
+                    action_direction = (
+                        1 if signal.action == SignalAction.BUY
+                        else -1 if signal.action == SignalAction.SELL
+                        else 0
+                    )
+                    if predicted == action_direction:
+                        model_confidence = clamp(
+                            model_confidence * 0.70
+                            + offline_ml["confidence"] * 0.30,
+                            0.0,
+                            1.0,
+                        )
+                    elif predicted != 0:
+                        model_confidence = clamp(
+                            model_confidence * 0.85,
+                            0.0,
+                            1.0,
+                        )
+                    else:
+                        model_confidence = clamp(
+                            model_confidence * 0.95,
+                            0.0,
+                            1.0,
+                        )
+                    self.logger.info(
+                        "OFFLINE ML CONFIRMATION | action=%s | prediction=%s | "
+                        "confidence=%.4f | label=%s",
+                        signal.action.value,
+                        predicted,
+                        offline_ml["confidence"],
+                        offline_ml["label"],
+                    )
+                except Exception:
+                    self.logger.exception(
+                        "Offline ML confirmation failed; continuing with online learner."
+                    )
 
             signal.confidence = clamp(
                 (
