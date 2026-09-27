@@ -4945,12 +4945,20 @@ class TradingEngine:
                 self.paper_execution.restore_state(self.recovery_state["paper_execution"])
             self.live_execution = None
 
-            # DEMO always uses the execution adapter for safe planning.
-            # When exchange orders are disabled, it can only dry-run and never calls Delta order placement.
+            restored_weights = self.recovery_state.get("strategy_weights")
+            if isinstance(restored_weights, dict):
+                for name, weight in restored_weights.items():
+                    if name in self.strategy_engine.strategy_weights:
+                        self.strategy_engine.strategy_weights[name] = clamp(safe_float(weight, 1.0), 0.50, 1.50)
+
+            self.delta.load_instruments()
+
+            # DEMO always uses the execution adapter for signal/risk/contract
+            # planning. With exchange execution disabled, it is a dry-run only
+            # and never calls Delta order placement.
             if self.settings.trading_mode.value == "DEMO":
-                if self.live_execution is None:
-                    self.live_execution = LiveExecutionEngine(
-                        rest_client=self.delta.rest,
+                self.live_execution = LiveExecutionEngine(
+                    rest_client=self.delta.rest,
                     instrument_manager=self.delta.instruments,
                     risk_engine=self.risk_engine,
                     result_handler=self._record_trade_result,
@@ -4961,24 +4969,17 @@ class TradingEngine:
                     allow_exchange_orders=self.order_execution_enabled,
                 )
 
-            restored_weights = self.recovery_state.get("strategy_weights")
-            if isinstance(restored_weights, dict):
-                for name, weight in restored_weights.items():
-                    if name in self.strategy_engine.strategy_weights:
-                        self.strategy_engine.strategy_weights[name] = clamp(safe_float(weight, 1.0), 0.50, 1.50)
-
-            self.delta.load_instruments()
-
             if self.order_execution_enabled:
                 execution_mode = self.settings.trading_mode.value
-                self.live_execution = LiveExecutionEngine(
-                    rest_client=self.delta.rest,
-                    instrument_manager=self.delta.instruments,
-                    risk_engine=self.risk_engine,
-                    result_handler=self._record_trade_result,
-                    execution_mode=execution_mode,
-                    taker_fee_rate=self.settings.taker_fee_rate,
-                    maker_fee_rate=self.settings.maker_fee_rate,
+                if self.live_execution is None:
+                    self.live_execution = LiveExecutionEngine(
+                        rest_client=self.delta.rest,
+                        instrument_manager=self.delta.instruments,
+                        risk_engine=self.risk_engine,
+                        result_handler=self._record_trade_result,
+                        execution_mode=execution_mode,
+                        taker_fee_rate=self.settings.taker_fee_rate,
+                        maker_fee_rate=self.settings.maker_fee_rate,
                         gst_rate=self.settings.trading_fee_gst_rate,
                         allow_exchange_orders=True,
                     )
