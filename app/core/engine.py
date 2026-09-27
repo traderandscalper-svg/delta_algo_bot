@@ -218,11 +218,12 @@ class PaperPosition:
 
     entry_price: float
     entry_timestamp: float
-    entry_wall_time: float = 0.0
 
     stop_loss: float
     take_profit: float
     trailing_stop: float
+
+    entry_wall_time: float = 0.0
 
     highest_price: float = 0.0
     lowest_price: float = 0.0
