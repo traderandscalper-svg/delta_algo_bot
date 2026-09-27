@@ -247,6 +247,9 @@ def load_market_data(
 
         timestamp = safe_float(
             row.get(
+                "timestamp_seconds"
+            )
+            or row.get(
                 "feature_timestamp_seconds"
             )
         )
