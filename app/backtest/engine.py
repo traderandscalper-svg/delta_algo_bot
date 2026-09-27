@@ -5,7 +5,9 @@ import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional\n\nfrom app.config.settings import Settings
+from typing import Dict, List, Optional
+
+from app.config.settings import Settings
 
 
 # ============================================================
