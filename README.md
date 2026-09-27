@@ -14,7 +14,8 @@ Advanced Delta Exchange India DEMO/TESTNET algorithmic trading bot.
 
 - Real Delta REST authentication
 - Real Delta public WebSocket market data
-- L1 order book and trade-flow features
+- L1/L2 order book, trade-flow and microstructure features
+- Real-time mark price, funding rate and open-interest context
 - Multi-timeframe strategy confirmation
 - Adaptive strategy weighting
 - Risk management and portfolio protection
@@ -27,6 +28,8 @@ Advanced Delta Exchange India DEMO/TESTNET algorithmic trading bot.
 - Chronological holdout evaluation
 - ML-driven historical backtesting
 - Offline ML confirmation in the paper trading engine
+- Crash-safe runtime persistence and paper-position recovery
+- Signal performance tracking at 1s/3s/5s/10s/30s/60s horizons
 - Watchdog and stale-data protection
 - Portfolio and strategy analytics
 
@@ -74,4 +77,4 @@ The research pipeline performs:
 
 The ML/backtest results are only meaningful after collecting a sufficiently large and representative real-market dataset. A few seconds of data is not enough for reliable model training or strategy validation.
 
-The project is designed for research and DEMO/PAPER execution. Do not enable live trading until the complete system has been independently validated.
+The project is designed for research and DEMO/PAPER execution. The architecture keeps live order execution disabled. Only the final external validation steps remain: collect a representative dataset, train/validate the model, run paper trading long enough to evaluate execution/risk behavior, and separately resolve any Delta account/API permission requirements before considering any live-order integration.
