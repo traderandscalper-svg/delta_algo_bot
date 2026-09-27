@@ -14,15 +14,21 @@ class LiveExecutionEngine:
     the exchange order IDs for recovery/audit.
     """
 
-    def __init__(self, rest_client, instrument_manager, risk_engine, result_handler=None, execution_mode="LIVE"):
+    def __init__(self, rest_client, instrument_manager, risk_engine, result_handler=None, execution_mode="LIVE", taker_fee_rate=0.0005, maker_fee_rate=0.0002, gst_rate=0.18):
         self.rest = rest_client
         self.instruments = instrument_manager
         self.risk_engine = risk_engine
         self.result_handler = result_handler
         self.execution_mode = str(execution_mode).upper()
+        self.taker_fee_rate = max(float(taker_fee_rate), 0.0)
+        self.maker_fee_rate = max(float(maker_fee_rate), 0.0)
+        self.gst_rate = max(float(gst_rate), 0.0)
         self.logger = logging.getLogger("ExchangeExecutionEngine")
         self.positions: dict[str, dict[str, Any]] = {}
         self.orders: dict[str, dict[str, Any]] = {}
+        self.total_trading_fees = 0.0
+        self.total_fee_gst = 0.0
+        self.total_fees = 0.0
 
     @staticmethod
     def _client_order_id(prefix: str) -> str:
@@ -45,6 +51,34 @@ class LiveExecutionEngine:
         if value <= 0:
             raise RuntimeError(f"Delta contract_value missing/invalid: {symbol}")
         return value
+
+    def _notional(self, symbol: str, contracts: int, price: float) -> float:
+        return float(contracts) * self._contract_value(symbol) * float(price)
+
+    def _estimate_trading_fee(self, symbol: str, contracts: int, price: float, maker: bool = False) -> float:
+        notional = self._notional(symbol, contracts, price)
+        rate = self.maker_fee_rate if maker else self.taker_fee_rate
+        return notional * rate
+
+    def _extract_trading_fee(self, response: dict[str, Any], fallback: float) -> float:
+        """Use a fee/commission returned by Delta when available; otherwise use the estimate."""
+        if not isinstance(response, dict):
+            return fallback
+        candidates = []
+        result = response.get("result")
+        if isinstance(result, dict):
+            candidates.append(result)
+        candidates.append(response)
+        for item in candidates:
+            for key in ("commission", "paid_commission", "commission_amount", "fee"):
+                value = item.get(key)
+                try:
+                    fee = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if fee >= 0:
+                    return fee
+        return fallback
 
     def _contract_size(self, symbol: str, base_quantity: float, price: float) -> int:
         """Convert risk-engine base-asset quantity into Delta derivative contracts."""
@@ -128,6 +162,8 @@ class LiveExecutionEngine:
         if contract_size <= 0:
             return False, "ORDER_SIZE_BELOW_DELTA_MINIMUM_OR_MARGIN_CAP"
 
+        estimated_entry_fee = self._estimate_trading_fee(symbol, contract_size, entry_reference, maker=False)
+        estimated_entry_gst = estimated_entry_fee * self.gst_rate
         response = self._place_market(
             symbol,
             side,
@@ -141,6 +177,8 @@ class LiveExecutionEngine:
         order_id = str(result.get("id", ""))
 
         entry_price = float(result.get("average_fill_price") or result.get("price") or entry_reference)
+        actual_entry_fee = self._extract_trading_fee(response, estimated_entry_fee)
+        actual_entry_gst = actual_entry_fee * self.gst_rate
         if side == "BUY":
             stop = entry_price * (1 - stop_pct)
             target = entry_price * (1 + target_pct)
@@ -159,12 +197,19 @@ class LiveExecutionEngine:
             "take_profit": target,
             "order_id": order_id,
             "entry_timestamp": float(signal.timestamp),
+            "entry_notional": self._notional(symbol, int(contract_size), entry_price),
+            "entry_trading_fee": float(actual_entry_fee),
+            "entry_fee_gst": float(actual_entry_gst),
+            "entry_fee_total": float(actual_entry_fee + actual_entry_gst),
             "learning_id": getattr(signal, "learning_id", ""),
             "strategy_names": list(signal.votes or ["AGGREGATED"]),
         }
+        self.total_trading_fees += actual_entry_fee
+        self.total_fee_gst += actual_entry_gst
+        self.total_fees += actual_entry_fee + actual_entry_gst
         self.risk_engine.record_trade()
         self.logger.warning(
-            "%s ENTRY SENT | symbol=%s side=%s contracts=%s base_quantity=%.8f entry=%.8f order_id=%s stop=%.8f target=%.8f",
+            "%s ENTRY SENT | symbol=%s side=%s contracts=%s base_quantity=%.8f entry=%.8f order_id=%s stop=%.8f target=%.8f entry_fee=%.8f entry_gst=%.8f",
             self.execution_mode,
             symbol,
             side,
@@ -174,6 +219,8 @@ class LiveExecutionEngine:
             order_id,
             stop,
             target,
+            actual_entry_fee,
+            actual_entry_gst,
         )
         return True, f"{self.execution_mode}_ENTRY_ACCEPTED"
 
@@ -182,22 +229,47 @@ class LiveExecutionEngine:
         if not position:
             return False, "NO_POSITION"
         side = "SELL" if position["side"] == "BUY" else "BUY"
-        response = self._place_market(symbol, side, int(position["quantity"]), True)
+        exit_contracts = int(position["quantity"])
+        response = self._place_market(symbol, side, exit_contracts, True)
         result = response.get("result", {}) if isinstance(response, dict) else {}
         exit_price = float(result.get("average_fill_price") or result.get("price") or (features.bid if side == "SELL" else features.ask))
         contract_value = float(position.get("contract_value") or self._contract_value(symbol))
+        estimated_exit_fee = self._estimate_trading_fee(symbol, exit_contracts, exit_price, maker=False)
+        exit_trading_fee = self._extract_trading_fee(response, estimated_exit_fee)
+        exit_fee_gst = exit_trading_fee * self.gst_rate
         if position["side"] == "BUY":
             pnl = (exit_price - position["entry_price"]) * position["quantity"] * contract_value
         else:
             pnl = (position["entry_price"] - exit_price) * position["quantity"] * contract_value
-        self.risk_engine.record_pnl(pnl)
+        gross_pnl = pnl
+        total_trading_fee = float(position.get("entry_trading_fee", 0.0)) + exit_trading_fee
+        total_fee_gst = float(position.get("entry_fee_gst", 0.0)) + exit_fee_gst
+        total_fees = total_trading_fee + total_fee_gst
+        net_pnl = gross_pnl - total_fees
+        self.total_trading_fees += exit_trading_fee
+        self.total_fee_gst += exit_fee_gst
+        self.total_fees += exit_trading_fee + exit_fee_gst
+        self.risk_engine.record_pnl(net_pnl)
         metadata = dict(position)
-        metadata.update({"exit_price": exit_price, "reason": reason, "exit_timestamp": time.time()})
+        metadata.update({
+            "exit_price": exit_price,
+            "exit_notional": self._notional(symbol, exit_contracts, exit_price),
+            "exit_trading_fee": exit_trading_fee,
+            "exit_fee_gst": exit_fee_gst,
+            "exit_fee_total": exit_trading_fee + exit_fee_gst,
+            "gross_pnl": gross_pnl,
+            "total_trading_fees": total_trading_fee,
+            "total_fee_gst": total_fee_gst,
+            "total_fees": total_fees,
+            "net_pnl": net_pnl,
+            "reason": reason,
+            "exit_timestamp": time.time(),
+        })
         if self.result_handler:
-            self.result_handler(position["strategy_names"], pnl, metadata)
+            self.result_handler(position["strategy_names"], net_pnl, metadata)
         self.logger.warning(
-            "LIVE EXIT SENT | symbol=%s side=%s quantity=%s exit=%.8f pnl=%+.8f reason=%s",
-            symbol, side, position["quantity"], exit_price, pnl, reason,
+            "%s EXIT SENT | symbol=%s side=%s quantity=%s exit=%.8f gross_pnl=%+.8f fees=%.8f net_pnl=%+.8f reason=%s",
+            self.execution_mode, symbol, side, position["quantity"], exit_price, gross_pnl, total_fees, net_pnl, reason,
         )
         del self.positions[symbol]
         return True, f"{self.execution_mode}_EXIT_ACCEPTED"
@@ -231,6 +303,9 @@ class LiveExecutionEngine:
             "execution_mode": self.execution_mode,
             "positions": {k: dict(v) for k, v in self.positions.items()},
             "orders": len(self.orders),
+            "total_trading_fees": self.total_trading_fees,
+            "total_fee_gst": self.total_fee_gst,
+            "total_fees": self.total_fees,
         }
 
     def snapshot_state(self):
