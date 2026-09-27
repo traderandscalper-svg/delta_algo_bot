@@ -1,0 +1,49 @@
+name: Build test package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile Python
+        run: |
+          python -m compileall -q app tests
+
+      - name: Run tests
+        run: |
+          pytest -q
+
+      - name: Build ZIP
+        run: |
+          rm -rf package_build
+          mkdir -p package_build
+          rsync -a --exclude='.git/' --exclude='package_build/' --exclude='__pycache__/' --exclude='.pytest_cache/' --exclude='*.pyc' --exclude='.venv/' --exclude='.venv-1/' --exclude='.venv-2/' ./ package_build/delta_algo_bot/
+          cd package_build
+          zip -r delta_algo_bot_test_ready.zip delta_algo_bot
+          cd ..
+          mkdir -p artifact
+          cp package_build/delta_algo_bot_test_ready.zip artifact/
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: delta_algo_bot_test_ready
+          path: artifact/delta_algo_bot_test_ready.zip
+          if-no-files-found: error
