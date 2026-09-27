@@ -36,7 +36,7 @@ class LiveExecutionEngine:
             raise RuntimeError(f"Delta product id missing: {symbol}")
         return int(product_id)
 
-    def _place_market(self, symbol: str, side: str, size: float, reduce_only: bool = False):
+    def _place_market(self, symbol: str, side: str, size: float, reduce_only: bool = False, stop_loss: float = 0.0, take_profit: float = 0.0, trail_amount: float = 0.0):
         if size <= 0:
             raise ValueError("Order size must be positive")
         payload = {
@@ -47,6 +47,12 @@ class LiveExecutionEngine:
             "reduce_only": bool(reduce_only),
             "client_order_id": self._client_order_id("mkt"),
         }
+        if not reduce_only and stop_loss > 0 and take_profit > 0:
+            payload["bracket_stop_trigger_method"] = "mark_price"
+            payload["bracket_stop_loss_price"] = str(stop_loss)
+            payload["bracket_take_profit_price"] = str(take_profit)
+            if trail_amount > 0:
+                payload["bracket_trail_amount"] = str(trail_amount)
         response = self.rest.place_order(payload)
         self.orders[str(response.get("result", {}).get("id", payload["client_order_id"]))] = response
         return response
