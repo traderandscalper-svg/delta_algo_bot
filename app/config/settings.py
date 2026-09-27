@@ -139,6 +139,14 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "LIVE mode requested but ENABLE_LIVE_TRADING=false."
                 )
+            if not self.delta_rest_url or "api.india.delta.exchange" not in self.delta_rest_url:
+                raise ValueError("LIVE mode requires Delta India production REST URL.")
+            if not self.delta_public_ws_url or "public-socket.india.delta.exchange" not in self.delta_public_ws_url:
+                raise ValueError("LIVE mode requires Delta India production public WebSocket URL.")
+            if not self.delta_private_ws_url or "socket.india.delta.exchange" not in self.delta_private_ws_url:
+                raise ValueError("LIVE mode requires Delta India production private WebSocket URL.")
+            if not self.delta_api_key or not self.delta_api_secret:
+                raise ValueError("LIVE mode requires DELTA_API_KEY and DELTA_API_SECRET.")
 
         if self.max_risk_per_trade > self.max_daily_loss:
             raise ValueError(
