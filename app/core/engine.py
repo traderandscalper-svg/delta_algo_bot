@@ -18,6 +18,7 @@ from app.market_data.collector import MarketDataCollector
 from app.safety.watchdog import Watchdog
 from app.strategies.engine import StrategyEngine as Phase9StrategyEngine
 from app.ml.predict import MLPredictor
+from app.strategies.signal_performance_tracker import SignalPerformanceTracker
 
 
 # ============================================================
@@ -188,6 +189,11 @@ class MarketFeatures:
     bid_size: float = 0.0
     ask_size: float = 0.0
 
+    mark_price: float = 0.0
+    funding_rate: float = 0.0
+    open_interest: float = 0.0
+    open_interest_change: float = 0.0
+
     spread: float = 0.0
     spread_bps: float = 0.0
     orderbook_imbalance: float = 0.0
@@ -285,6 +291,12 @@ class FeatureEngine:
         self.flow_history = deque(maxlen=200)
 
         self.latest_live_microstructure = {}
+        self.latest_market_context = {
+            "mark_price": 0.0,
+            "funding_rate": 0.0,
+            "open_interest": 0.0,
+            "open_interest_change": 0.0,
+        }
 
         self.buy_volume = 0.0
         self.sell_volume = 0.0
@@ -328,6 +340,12 @@ class FeatureEngine:
                 payload,
                 timestamp,
             )
+
+        elif event_type == "mark_price":
+            self._process_mark_price(payload)
+
+        elif event_type == "funding_rate":
+            self._process_funding_rate(payload)
 
     # --------------------------------------------------------
 
@@ -417,6 +435,16 @@ class FeatureEngine:
         }
 
     # --------------------------------------------------------
+
+    def _process_mark_price(self, payload: dict[str, Any]) -> None:
+        value = safe_float(payload.get("p", payload.get("mark_price", payload.get("price"))))
+        if value > 0:
+            self.latest_market_context["mark_price"] = value
+
+    def _process_funding_rate(self, payload: dict[str, Any]) -> None:
+        rate = safe_float(payload.get("fr", payload.get("funding_rate")))
+        if math.isfinite(rate):
+            self.latest_market_context["funding_rate"] = rate
 
     def _process_trade(
         self,
@@ -571,6 +599,19 @@ class FeatureEngine:
         payload: dict[str, Any],
         timestamp: float,
     ) -> None:
+        mark = safe_float(payload.get("m", payload.get("mark_price")))
+        if mark > 0:
+            self.latest_market_context["mark_price"] = mark
+        oi = payload.get("oi")
+        if isinstance(oi, (list, tuple)):
+            if len(oi) > 0:
+                self.latest_market_context["open_interest"] = safe_float(oi[0])
+            if len(oi) > 1:
+                self.latest_market_context["open_interest_change"] = safe_float(oi[1])
+        else:
+            self.latest_market_context["open_interest"] = safe_float(payload.get("open_interest"), self.latest_market_context["open_interest"])
+            self.latest_market_context["open_interest_change"] = safe_float(payload.get("open_interest_change"), self.latest_market_context["open_interest_change"])
+
 
         data = payload.get("d")
 
@@ -949,6 +990,10 @@ class FeatureEngine:
             ask=ask,
             bid_size=bid_size,
             ask_size=ask_size,
+            mark_price=safe_float(self.latest_market_context.get("mark_price"), price),
+            funding_rate=safe_float(self.latest_market_context.get("funding_rate")),
+            open_interest=safe_float(self.latest_market_context.get("open_interest")),
+            open_interest_change=safe_float(self.latest_market_context.get("open_interest_change")),
             spread=spread,
             spread_bps=spread_bps,
             orderbook_imbalance=(
@@ -4622,6 +4667,8 @@ class TradingEngine:
             StrategyValidator()
         )
 
+        self.signal_performance_tracker = SignalPerformanceTracker()
+
         self.learning_engine = (
             LearningEngine()
         )
@@ -5348,6 +5395,8 @@ class TradingEngine:
                 features.warmup_complete,
             )
 
+            self.signal_performance_tracker.process_candle(candle)
+
             signal = (
                 self.strategy_engine
                 .evaluate(
@@ -5355,6 +5404,8 @@ class TradingEngine:
                     strategy_candles,
                 )
             )
+
+            self.signal_performance_tracker.record_signal(signal, candle)
 
             learning_id = self.learning_engine.record(
                 features,
@@ -5717,6 +5768,11 @@ class TradingEngine:
                     features.ask_size
                 ),
 
+                "mark_price": features.mark_price,
+                "funding_rate": features.funding_rate,
+                "open_interest": features.open_interest,
+                "open_interest_change": features.open_interest_change,
+
                 "spread": (
                     features.spread
                 ),
@@ -5876,6 +5932,8 @@ class TradingEngine:
                 self.strategy_engine
                 .strategy_weights
             ),
+
+            "signal_performance": self.signal_performance_tracker.get_stats(),
 
             "learning": (
                 self.learning_engine
