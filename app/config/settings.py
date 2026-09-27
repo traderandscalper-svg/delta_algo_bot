@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     log_directory: str = "logs"
 
     # Persistent market/ML/runtime data. On Windows this defaults to E:\\delta_algo_bot_data.
-    data_directory: str = os.environ.get("DELTA_DATA_DIRECTORY", r"E:\\delta_algo_bot_data")
+    data_directory: str = r"E:\\delta_algo_bot_data"
 
     @field_validator("delta_rest_url", "delta_public_ws_url", "delta_private_ws_url")
     @classmethod
