@@ -15,7 +15,7 @@ class DeltaRestClient:
     REST API client for Delta Exchange India.
 
     Supports public and authenticated requests.
-    This client does not submit trading orders.
+    Supports authenticated account and trading-order requests.
     """
 
     def __init__(self, settings: Settings):
@@ -345,13 +345,10 @@ class DeltaRestClient:
         )
 
     def get_positions(self) -> Dict[str, Any]:
-        """
-        Retrieve margined positions.
-        """
-
+        """Retrieve real-time open positions from Delta."""
         return self.request(
             method="GET",
-            path="/v2/positions/margined",
+            path="/v2/positions",
             authenticated=True,
         )
 
