@@ -318,6 +318,17 @@ class DeltaRestClient:
             authenticated=False,
         )
 
+    def get_product(self, symbol: str) -> Dict[str, Any]:
+        """Retrieve one product by its exact Delta product symbol."""
+        if not symbol or not str(symbol).strip():
+            raise ValueError("Product symbol must be provided.")
+
+        return self.request(
+            method="GET",
+            path=f"/v2/products/{str(symbol).strip()}",
+            authenticated=False,
+        )
+
     def get_tickers(self) -> Dict[str, Any]:
         """
         Retrieve ticker information.
