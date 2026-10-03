@@ -113,7 +113,7 @@ class LiveExecutionEngine:
         if not primary_product:
             raise RuntimeError(
                 "BTCUSD product is required for exchange-state reconciliation "
-                "but was not loaded from Delta."
+                "but could not be resolved from Delta."
             )
 
         product_id = primary_product.get("id")
@@ -126,6 +126,51 @@ class LiveExecutionEngine:
             product_id=int(product_id)
         )
         orders_response = self.rest.get_open_orders()
+
+        raw_positions = positions_response.get("result", []) if isinstance(positions_response, dict) else []
+        if isinstance(raw_positions, dict):
+            raw_positions = [raw_positions]
+
+        exchange_positions = 0
+        for raw in raw_positions if isinstance(raw_positions, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            size = int(float(raw.get("size") or 0))
+            if size == 0:
+                continue
+            symbol = str(
+                raw.get("product_symbol")
+                or raw.get("symbol")
+                or primary_product.get("symbol")
+                or "BTCUSD"
+            ).upper()
+            self.positions[symbol] = {
+                "symbol": symbol,
+                "side": "BUY" if size > 0 else "SELL",
+                "quantity": abs(size),
+                "entry_price": float(raw.get("entry_price") or 0.0),
+                "managed_by_bot": False,
+                "reconciled": True,
+                "exchange_position": dict(raw),
+            }
+            exchange_positions += 1
+            self.logger.warning(
+                "EXCHANGE POSITION RECONCILED | symbol=%s | side=%s | contracts=%d | entry_price=%s | manual_management_required=true",
+                symbol,
+                self.positions[symbol]["side"],
+                abs(size),
+                raw.get("entry_price"),
+            )
+
+        raw_orders = orders_response.get("result", []) if isinstance(orders_response, dict) else []
+        if isinstance(raw_orders, dict):
+            raw_orders = [raw_orders]
+        open_orders = len(raw_orders) if isinstance(raw_orders, list) else 0
+
+        return {
+            "exchange_positions": exchange_positions,
+            "open_orders": open_orders,
+        }
 
     def _place_market(self, symbol: str, side: str, size: float, reduce_only: bool = False, stop_loss: float = 0.0, take_profit: float = 0.0, trail_amount: float = 0.0):
         if size <= 0:
@@ -295,7 +340,9 @@ class LiveExecutionEngine:
 
         position_verified = False
         try:
-            pr = self.rest.get_positions()
+            pr = self.rest.get_positions(
+                product_id=self._product_id(symbol)
+            )
             raw_positions = pr.get("result", []) if isinstance(pr, dict) else []
             if isinstance(raw_positions, dict):
                 raw_positions = [raw_positions]
