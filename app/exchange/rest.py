@@ -344,11 +344,31 @@ class DeltaRestClient:
             authenticated=True,
         )
 
-    def get_positions(self) -> Dict[str, Any]:
-        """Retrieve real-time open positions from Delta."""
+    def get_positions(
+        self,
+        product_id: Optional[int] = None,
+        underlying_asset_symbol: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Retrieve a real-time Delta position.
+
+        Delta requires exactly one of product_id or
+        underlying_asset_symbol for GET /v2/positions.
+        """
+        if (product_id is None) == (underlying_asset_symbol is None):
+            raise ValueError(
+                "Exactly one of product_id or underlying_asset_symbol "
+                "must be provided for Delta positions."
+            )
+
+        params = {
+            "product_id": product_id,
+            "underlying_asset_symbol": underlying_asset_symbol,
+        }
+
         return self.request(
             method="GET",
             path="/v2/positions",
+            params=params,
             authenticated=True,
         )
 
