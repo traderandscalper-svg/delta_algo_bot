@@ -270,14 +270,14 @@ class DeltaClient:
     # INSTRUMENTS
     # ========================================================
 
-    def load_instruments(self):
+    def load_instruments(self, required_symbols=None):
 
         self.logger.info(
             "Loading Delta instruments..."
         )
 
         instruments = (
-            self.instruments.load()
+            self.instruments.load(required_symbols=required_symbols)
         )
 
         self.logger.info(
