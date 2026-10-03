@@ -151,6 +151,18 @@ class Settings(BaseSettings):
                     "DELTA_API_SECRET is required in DEMO mode."
                 )
 
+            # DEMO means Delta Exchange's testnet/demo environment.
+            # Exchange order execution is intentionally enabled for this
+            # mode so a local .env value of ENABLE_DEMO_TRADING=false
+            # cannot silently turn the order adapter into a dry-run.
+            # Production LIVE mode remains separately gated below.
+            if "testnet" not in self.delta_rest_url.lower():
+                raise ValueError(
+                    "DEMO mode requires the Delta Exchange testnet REST URL."
+                )
+
+            self.enable_demo_trading = True
+
         if self.trading_mode == TradingMode.LIVE:
             if not self.enable_live_trading:
                 raise ValueError(
