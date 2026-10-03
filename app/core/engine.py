@@ -4951,7 +4951,10 @@ class TradingEngine:
                     if name in self.strategy_engine.strategy_weights:
                         self.strategy_engine.strategy_weights[name] = clamp(safe_float(weight, 1.0), 0.50, 1.50)
 
-            self.delta.load_instruments()
+            # BTCUSD is the current market-data/execution universe. The
+            # instrument manager resolves it directly if it is not present
+            # on the first paginated products page.
+            self.delta.load_instruments(required_symbols=["BTCUSD"])
 
             # DEMO always uses the execution adapter for signal/risk/contract
             # planning. With exchange execution disabled, it is a dry-run only
